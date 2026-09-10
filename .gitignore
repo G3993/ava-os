@@ -1,0 +1,8 @@
+build/
+build-win/
+dist/
+.DS_Store
+.gstack/
+ipad/build/
+ipad/DerivedData/
+*.xcuserstate

@@ -1,0 +1,389 @@
+// !$*UTF8*$!
+{
+	archiveVersion = 1;
+	classes = {
+	};
+	objectVersion = 77;
+	objects = {
+
+/* Begin PBXBuildFile section */
+		1F0A9C7385255DC52677BE6B /* ContentView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1AAACF55E797DCE953166404 /* ContentView.swift */; };
+		234CD2DA8DB74679DE4C78FE /* analysis.cpp in Sources */ = {isa = PBXBuildFile; fileRef = 03888FCBCFD5E0320BF69266 /* analysis.cpp */; };
+		6B6DB340326E731C634C1E90 /* AudioBridge.mm in Sources */ = {isa = PBXBuildFile; fileRef = F13CBBC4FD3BC3C11445E11E /* AudioBridge.mm */; };
+		6F2FBE464FCD90018CAC6BCE /* AVFoundation.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = 21EFD627D29E925DEF6FC2C7 /* AVFoundation.framework */; };
+		A0403940FE2FA195E1787341 /* engine.cpp in Sources */ = {isa = PBXBuildFile; fileRef = DC220BB49176201ADAD1386E /* engine.cpp */; };
+		AEACFDFF064AB132FAC2DBF9 /* OctagonPadView.swift in Sources */ = {isa = PBXBuildFile; fileRef = BB5F53F32A9F803B79C1EB5A /* OctagonPadView.swift */; };
+		B279F7843A9BFA960323904D /* Accelerate.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = 73F8C6C541400685792974D1 /* Accelerate.framework */; };
+		CAFC40FDD24960F68A9E2176 /* Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = 0D4FC2D5708ED9A9895ECC48 /* Assets.xcassets */; };
+		E6A349A57FC0C3E30DF7BEA1 /* AVAOSApp.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5964549FE2DAE294A487B39A /* AVAOSApp.swift */; };
+/* End PBXBuildFile section */
+
+/* Begin PBXFileReference section */
+		03888FCBCFD5E0320BF69266 /* analysis.cpp */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.cpp.cpp; path = analysis.cpp; sourceTree = "<group>"; };
+		0B4A7C38169D037D9509D164 /* analysis.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = analysis.h; sourceTree = "<group>"; };
+		0B85ADE9D0037266D164F73F /* AudioBridge.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = AudioBridge.h; sourceTree = "<group>"; };
+		0D4FC2D5708ED9A9895ECC48 /* Assets.xcassets */ = {isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; path = Assets.xcassets; sourceTree = "<group>"; };
+		1AAACF55E797DCE953166404 /* ContentView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ContentView.swift; sourceTree = "<group>"; };
+		21EFD627D29E925DEF6FC2C7 /* AVFoundation.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = AVFoundation.framework; path = System/Library/Frameworks/AVFoundation.framework; sourceTree = SDKROOT; };
+		27AD6F6A463DD51B51FEB31E /* rfft.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = rfft.h; sourceTree = "<group>"; };
+		280080306A45B5E6F2511DE5 /* dsp.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = dsp.h; sourceTree = "<group>"; };
+		5964549FE2DAE294A487B39A /* AVAOSApp.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AVAOSApp.swift; sourceTree = "<group>"; };
+		73F8C6C541400685792974D1 /* Accelerate.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = Accelerate.framework; path = System/Library/Frameworks/Accelerate.framework; sourceTree = SDKROOT; };
+		9044CB4EE4CEFDEDF39AF499 /* ringbuf.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = ringbuf.h; sourceTree = "<group>"; };
+		AEB8B712703D46378B101FFD /* Bridging.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = Bridging.h; sourceTree = "<group>"; };
+		B1D1A91DD9AC387C3C69EA9A /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist; path = Info.plist; sourceTree = "<group>"; };
+		B6220AA78EAEFD29A64FCADF /* engine.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = engine.h; sourceTree = "<group>"; };
+		BB5F53F32A9F803B79C1EB5A /* OctagonPadView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = OctagonPadView.swift; sourceTree = "<group>"; };
+		C3843A47408EC337F65F9AF1 /* AVAOS.app */ = {isa = PBXFileReference; includeInIndex = 0; lastKnownFileType = wrapper.application; path = AVAOS.app; sourceTree = BUILT_PRODUCTS_DIR; };
+		DC220BB49176201ADAD1386E /* engine.cpp */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.cpp.cpp; path = engine.cpp; sourceTree = "<group>"; };
+		F13CBBC4FD3BC3C11445E11E /* AudioBridge.mm */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.cpp.objcpp; path = AudioBridge.mm; sourceTree = "<group>"; };
+/* End PBXFileReference section */
+
+/* Begin PBXFrameworksBuildPhase section */
+		8F43D15340531EA4F5F49CFC /* Frameworks */ = {
+			isa = PBXFrameworksBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				B279F7843A9BFA960323904D /* Accelerate.framework in Frameworks */,
+				6F2FBE464FCD90018CAC6BCE /* AVFoundation.framework in Frameworks */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXFrameworksBuildPhase section */
+
+/* Begin PBXGroup section */
+		22B42DAC85F5BD0BA6F8EF4E /* Products */ = {
+			isa = PBXGroup;
+			children = (
+				C3843A47408EC337F65F9AF1 /* AVAOS.app */,
+			);
+			name = Products;
+			sourceTree = "<group>";
+		};
+		5706EBB328637707491C3C50 /* App */ = {
+			isa = PBXGroup;
+			children = (
+				0D4FC2D5708ED9A9895ECC48 /* Assets.xcassets */,
+				0B85ADE9D0037266D164F73F /* AudioBridge.h */,
+				F13CBBC4FD3BC3C11445E11E /* AudioBridge.mm */,
+				5964549FE2DAE294A487B39A /* AVAOSApp.swift */,
+				AEB8B712703D46378B101FFD /* Bridging.h */,
+				1AAACF55E797DCE953166404 /* ContentView.swift */,
+				B1D1A91DD9AC387C3C69EA9A /* Info.plist */,
+				BB5F53F32A9F803B79C1EB5A /* OctagonPadView.swift */,
+			);
+			path = App;
+			sourceTree = "<group>";
+		};
+		BEC18B244261766BD86E6AA3 /* src */ = {
+			isa = PBXGroup;
+			children = (
+				03888FCBCFD5E0320BF69266 /* analysis.cpp */,
+				0B4A7C38169D037D9509D164 /* analysis.h */,
+				280080306A45B5E6F2511DE5 /* dsp.h */,
+				DC220BB49176201ADAD1386E /* engine.cpp */,
+				B6220AA78EAEFD29A64FCADF /* engine.h */,
+				27AD6F6A463DD51B51FEB31E /* rfft.h */,
+				9044CB4EE4CEFDEDF39AF499 /* ringbuf.h */,
+			);
+			name = src;
+			path = ../src;
+			sourceTree = "<group>";
+		};
+		DC5C1C87CB6B4EBBCDC9940E = {
+			isa = PBXGroup;
+			children = (
+				5706EBB328637707491C3C50 /* App */,
+				BEC18B244261766BD86E6AA3 /* src */,
+				DD9FFEAEAD247DAC5FC7B35A /* Frameworks */,
+				22B42DAC85F5BD0BA6F8EF4E /* Products */,
+			);
+			sourceTree = "<group>";
+		};
+		DD9FFEAEAD247DAC5FC7B35A /* Frameworks */ = {
+			isa = PBXGroup;
+			children = (
+				73F8C6C541400685792974D1 /* Accelerate.framework */,
+				21EFD627D29E925DEF6FC2C7 /* AVFoundation.framework */,
+			);
+			name = Frameworks;
+			sourceTree = "<group>";
+		};
+/* End PBXGroup section */
+
+/* Begin PBXNativeTarget section */
+		F3ADC7934532D5CDEFE94BEB /* AVAOS */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = 2103AAEA419A2D603C301567 /* Build configuration list for PBXNativeTarget "AVAOS" */;
+			buildPhases = (
+				6672AC494D7057065C97E216 /* Sources */,
+				F80B9BB6FF9D777C5EDEBA34 /* Resources */,
+				8F43D15340531EA4F5F49CFC /* Frameworks */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+			);
+			name = AVAOS;
+			packageProductDependencies = (
+			);
+			productName = AVAOS;
+			productReference = C3843A47408EC337F65F9AF1 /* AVAOS.app */;
+			productType = "com.apple.product-type.application";
+		};
+/* End PBXNativeTarget section */
+
+/* Begin PBXProject section */
+		EF2E3836204C4D99AB4F21D7 /* Project object */ = {
+			isa = PBXProject;
+			attributes = {
+				BuildIndependentTargetsInParallel = YES;
+				LastUpgradeCheck = 1430;
+				TargetAttributes = {
+					F3ADC7934532D5CDEFE94BEB = {
+						DevelopmentTeam = JSWF5RVAU3;
+						ProvisioningStyle = Automatic;
+					};
+				};
+			};
+			buildConfigurationList = E6742F92C5877C23530E097A /* Build configuration list for PBXProject "AVAOS" */;
+			developmentRegion = en;
+			hasScannedForEncodings = 0;
+			knownRegions = (
+				Base,
+				en,
+			);
+			mainGroup = DC5C1C87CB6B4EBBCDC9940E;
+			minimizedProjectReferenceProxies = 1;
+			preferredProjectObjectVersion = 77;
+			productRefGroup = 22B42DAC85F5BD0BA6F8EF4E /* Products */;
+			projectDirPath = "";
+			projectRoot = "";
+			targets = (
+				F3ADC7934532D5CDEFE94BEB /* AVAOS */,
+			);
+		};
+/* End PBXProject section */
+
+/* Begin PBXResourcesBuildPhase section */
+		F80B9BB6FF9D777C5EDEBA34 /* Resources */ = {
+			isa = PBXResourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				CAFC40FDD24960F68A9E2176 /* Assets.xcassets in Resources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXResourcesBuildPhase section */
+
+/* Begin PBXSourcesBuildPhase section */
+		6672AC494D7057065C97E216 /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				E6A349A57FC0C3E30DF7BEA1 /* AVAOSApp.swift in Sources */,
+				6B6DB340326E731C634C1E90 /* AudioBridge.mm in Sources */,
+				1F0A9C7385255DC52677BE6B /* ContentView.swift in Sources */,
+				AEACFDFF064AB132FAC2DBF9 /* OctagonPadView.swift in Sources */,
+				234CD2DA8DB74679DE4C78FE /* analysis.cpp in Sources */,
+				A0403940FE2FA195E1787341 /* engine.cpp in Sources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXSourcesBuildPhase section */
+
+/* Begin XCBuildConfiguration section */
+		2F4B7A69D741EC2597F1F5E5 /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ALWAYS_SEARCH_USER_PATHS = NO;
+				CLANG_ANALYZER_NONNULL = YES;
+				CLANG_ANALYZER_NUMBER_OBJECT_CONVERSION = YES_AGGRESSIVE;
+				CLANG_CXX_LANGUAGE_STANDARD = "gnu++14";
+				CLANG_CXX_LIBRARY = "libc++";
+				CLANG_ENABLE_MODULES = YES;
+				CLANG_ENABLE_OBJC_ARC = YES;
+				CLANG_ENABLE_OBJC_WEAK = YES;
+				CLANG_WARN_BLOCK_CAPTURE_AUTORELEASING = YES;
+				CLANG_WARN_BOOL_CONVERSION = YES;
+				CLANG_WARN_COMMA = YES;
+				CLANG_WARN_CONSTANT_CONVERSION = YES;
+				CLANG_WARN_DEPRECATED_OBJC_IMPLEMENTATIONS = YES;
+				CLANG_WARN_DIRECT_OBJC_ISA_USAGE = YES_ERROR;
+				CLANG_WARN_DOCUMENTATION_COMMENTS = YES;
+				CLANG_WARN_EMPTY_BODY = YES;
+				CLANG_WARN_ENUM_CONVERSION = YES;
+				CLANG_WARN_INFINITE_RECURSION = YES;
+				CLANG_WARN_INT_CONVERSION = YES;
+				CLANG_WARN_NON_LITERAL_NULL_CONVERSION = YES;
+				CLANG_WARN_OBJC_IMPLICIT_RETAIN_SELF = YES;
+				CLANG_WARN_OBJC_LITERAL_CONVERSION = YES;
+				CLANG_WARN_OBJC_ROOT_CLASS = YES_ERROR;
+				CLANG_WARN_QUOTED_INCLUDE_IN_FRAMEWORK_HEADER = YES;
+				CLANG_WARN_RANGE_LOOP_ANALYSIS = YES;
+				CLANG_WARN_STRICT_PROTOTYPES = YES;
+				CLANG_WARN_SUSPICIOUS_MOVE = YES;
+				CLANG_WARN_UNGUARDED_AVAILABILITY = YES_AGGRESSIVE;
+				CLANG_WARN_UNREACHABLE_CODE = YES;
+				CLANG_WARN__DUPLICATE_METHOD_MATCH = YES;
+				COPY_PHASE_STRIP = NO;
+				DEBUG_INFORMATION_FORMAT = "dwarf-with-dsym";
+				ENABLE_NS_ASSERTIONS = NO;
+				ENABLE_STRICT_OBJC_MSGSEND = YES;
+				GCC_C_LANGUAGE_STANDARD = gnu11;
+				GCC_NO_COMMON_BLOCKS = YES;
+				GCC_WARN_64_TO_32_BIT_CONVERSION = YES;
+				GCC_WARN_ABOUT_RETURN_TYPE = YES_ERROR;
+				GCC_WARN_UNDECLARED_SELECTOR = YES;
+				GCC_WARN_UNINITIALIZED_AUTOS = YES_AGGRESSIVE;
+				GCC_WARN_UNUSED_FUNCTION = YES;
+				GCC_WARN_UNUSED_VARIABLE = YES;
+				IPHONEOS_DEPLOYMENT_TARGET = 16.0;
+				MTL_ENABLE_DEBUG_INFO = NO;
+				MTL_FAST_MATH = YES;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SDKROOT = iphoneos;
+				SWIFT_COMPILATION_MODE = wholemodule;
+				SWIFT_OPTIMIZATION_LEVEL = "-O";
+				SWIFT_VERSION = 5.0;
+			};
+			name = Release;
+		};
+		74E36716137539A79239851C /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
+				CLANG_CXX_LANGUAGE_STANDARD = "c++17";
+				CODE_SIGN_IDENTITY = "iPhone Developer";
+				CODE_SIGN_STYLE = Automatic;
+				DEVELOPMENT_TEAM = JSWF5RVAU3;
+				HEADER_SEARCH_PATHS = "$(SRCROOT)/../src";
+				INFOPLIST_FILE = App/Info.plist;
+				INFOPLIST_KEY_UIStatusBarHidden = YES;
+				IPHONEOS_DEPLOYMENT_TARGET = 16.0;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/Frameworks",
+				);
+				PRODUCT_BUNDLE_IDENTIFIER = nyc.soundtemple.ava;
+				PRODUCT_NAME = "AVA OS";
+				SDKROOT = iphoneos;
+				SWIFT_OBJC_BRIDGING_HEADER = App/Bridging.h;
+				SWIFT_VERSION = 5.9;
+				TARGETED_DEVICE_FAMILY = 2;
+			};
+			name = Debug;
+		};
+		A98C3E63FD71FC8AE6F8E461 /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
+				CLANG_CXX_LANGUAGE_STANDARD = "c++17";
+				CODE_SIGN_IDENTITY = "iPhone Developer";
+				CODE_SIGN_STYLE = Automatic;
+				DEVELOPMENT_TEAM = JSWF5RVAU3;
+				HEADER_SEARCH_PATHS = "$(SRCROOT)/../src";
+				INFOPLIST_FILE = App/Info.plist;
+				INFOPLIST_KEY_UIStatusBarHidden = YES;
+				IPHONEOS_DEPLOYMENT_TARGET = 16.0;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/Frameworks",
+				);
+				PRODUCT_BUNDLE_IDENTIFIER = nyc.soundtemple.ava;
+				PRODUCT_NAME = "AVA OS";
+				SDKROOT = iphoneos;
+				SWIFT_OBJC_BRIDGING_HEADER = App/Bridging.h;
+				SWIFT_VERSION = 5.9;
+				TARGETED_DEVICE_FAMILY = 2;
+			};
+			name = Release;
+		};
+		C270695509EE8A3BA47A8D62 /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ALWAYS_SEARCH_USER_PATHS = NO;
+				CLANG_ANALYZER_NONNULL = YES;
+				CLANG_ANALYZER_NUMBER_OBJECT_CONVERSION = YES_AGGRESSIVE;
+				CLANG_CXX_LANGUAGE_STANDARD = "gnu++14";
+				CLANG_CXX_LIBRARY = "libc++";
+				CLANG_ENABLE_MODULES = YES;
+				CLANG_ENABLE_OBJC_ARC = YES;
+				CLANG_ENABLE_OBJC_WEAK = YES;
+				CLANG_WARN_BLOCK_CAPTURE_AUTORELEASING = YES;
+				CLANG_WARN_BOOL_CONVERSION = YES;
+				CLANG_WARN_COMMA = YES;
+				CLANG_WARN_CONSTANT_CONVERSION = YES;
+				CLANG_WARN_DEPRECATED_OBJC_IMPLEMENTATIONS = YES;
+				CLANG_WARN_DIRECT_OBJC_ISA_USAGE = YES_ERROR;
+				CLANG_WARN_DOCUMENTATION_COMMENTS = YES;
+				CLANG_WARN_EMPTY_BODY = YES;
+				CLANG_WARN_ENUM_CONVERSION = YES;
+				CLANG_WARN_INFINITE_RECURSION = YES;
+				CLANG_WARN_INT_CONVERSION = YES;
+				CLANG_WARN_NON_LITERAL_NULL_CONVERSION = YES;
+				CLANG_WARN_OBJC_IMPLICIT_RETAIN_SELF = YES;
+				CLANG_WARN_OBJC_LITERAL_CONVERSION = YES;
+				CLANG_WARN_OBJC_ROOT_CLASS = YES_ERROR;
+				CLANG_WARN_QUOTED_INCLUDE_IN_FRAMEWORK_HEADER = YES;
+				CLANG_WARN_RANGE_LOOP_ANALYSIS = YES;
+				CLANG_WARN_STRICT_PROTOTYPES = YES;
+				CLANG_WARN_SUSPICIOUS_MOVE = YES;
+				CLANG_WARN_UNGUARDED_AVAILABILITY = YES_AGGRESSIVE;
+				CLANG_WARN_UNREACHABLE_CODE = YES;
+				CLANG_WARN__DUPLICATE_METHOD_MATCH = YES;
+				COPY_PHASE_STRIP = NO;
+				DEBUG_INFORMATION_FORMAT = dwarf;
+				ENABLE_STRICT_OBJC_MSGSEND = YES;
+				ENABLE_TESTABILITY = YES;
+				GCC_C_LANGUAGE_STANDARD = gnu11;
+				GCC_DYNAMIC_NO_PIC = NO;
+				GCC_NO_COMMON_BLOCKS = YES;
+				GCC_OPTIMIZATION_LEVEL = 0;
+				GCC_PREPROCESSOR_DEFINITIONS = (
+					"$(inherited)",
+					"DEBUG=1",
+				);
+				GCC_WARN_64_TO_32_BIT_CONVERSION = YES;
+				GCC_WARN_ABOUT_RETURN_TYPE = YES_ERROR;
+				GCC_WARN_UNDECLARED_SELECTOR = YES;
+				GCC_WARN_UNINITIALIZED_AUTOS = YES_AGGRESSIVE;
+				GCC_WARN_UNUSED_FUNCTION = YES;
+				GCC_WARN_UNUSED_VARIABLE = YES;
+				IPHONEOS_DEPLOYMENT_TARGET = 16.0;
+				MTL_ENABLE_DEBUG_INFO = INCLUDE_SOURCE;
+				MTL_FAST_MATH = YES;
+				ONLY_ACTIVE_ARCH = YES;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SDKROOT = iphoneos;
+				SWIFT_ACTIVE_COMPILATION_CONDITIONS = DEBUG;
+				SWIFT_OPTIMIZATION_LEVEL = "-Onone";
+				SWIFT_VERSION = 5.0;
+			};
+			name = Debug;
+		};
+/* End XCBuildConfiguration section */
+
+/* Begin XCConfigurationList section */
+		2103AAEA419A2D603C301567 /* Build configuration list for PBXNativeTarget "AVAOS" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				74E36716137539A79239851C /* Debug */,
+				A98C3E63FD71FC8AE6F8E461 /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Debug;
+		};
+		E6742F92C5877C23530E097A /* Build configuration list for PBXProject "AVAOS" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				C270695509EE8A3BA47A8D62 /* Debug */,
+				2F4B7A69D741EC2597F1F5E5 /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Debug;
+		};
+/* End XCConfigurationList section */
+	};
+	rootObject = EF2E3836204C4D99AB4F21D7 /* Project object */;
+}
