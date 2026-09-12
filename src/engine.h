@@ -5,16 +5,35 @@
 // Zones: 0=HEAD 1=HEART 2=BELLY 3=ROOT 4=FEET
 #pragma once
 #include <atomic>
+#include <cstdint>
 #include "dsp.h"
 #include "analysis.h"
 
 enum Zone { HEAD = 0, HEART, BELLY, ROOT, FEET, NZONES };
+
+// The bed: 44 ring transducers (HEAD/HEART/BELLY/ROOT) rated 10-80 Hz, and
+// one ButtKicker at the centre (FEET) rated 5-200 Hz. Everything the engine
+// sends is kept inside the band the hardware can actually turn into motion:
+// above 80 Hz a ring coil only heats, and only the centre can carry true sub.
+inline float zoneHzMin(int z) { return z == FEET ? 5.0f : 10.0f; }
+inline float zoneHzMax(int z) { return z == FEET ? 200.0f : 80.0f; }
+// where each zone feels strongest (pads, folds and drones aim here)
+inline float zoneSweetLo(int z) { return z == FEET ? 20.0f : 30.0f; }
+inline float zoneSweetHi(int z) { return z == FEET ? 80.0f : 70.0f; }
 
 enum Brainwave { DELTA = 0, THETA, ALPHA, BETA, GAMMA };
 static const float kBrainwaveHz[5] = {2.0f, 6.0f, 10.0f, 20.0f, 40.0f};
 static const char* kBrainwaveName[5] = {"delta", "theta", "alpha", "beta", "gamma"};
 
 struct Params {
+    // 0 = BODY: the original five-module synth, every zone a mix of one root
+    // 1 = SPLIT: each zone follows its own layer of the song (sub, bass line,
+    //     drums, vocal/chord melody, lead/air melody), own pitch, own rhythm
+    std::atomic<int>   engineMode{1};
+    // Lift: gentle upward expansion of the SPLIT layers — quiet sustained
+    // instruments (strings, piano, pads) come up to be felt, loud passages
+    // and transients are left alone. 0 = off, 1 = strong
+    std::atomic<float> lift{0.55f};
     std::atomic<float> intensity{0.7f};
     std::atomic<float> grounding{0.5f};
     std::atomic<float> uplift{0.5f};
@@ -65,7 +84,10 @@ struct Params {
     std::atomic<int>   padGate[NZONES]{{0}, {0}, {0}, {0}, {0}};
     std::atomic<float> padHz[NZONES]{{82.f}, {55.f}, {55.f}, {27.5f}, {27.5f}};
     std::atomic<float> padVel[NZONES]{{1.f}, {1.f}, {1.f}, {1.f}, {1.f}};
-    std::atomic<int>   padPatch{0}; // index into kPadPatches
+    std::atomic<int>   padPatch{0}; // selected voice (index into kPadPatches)
+    // voice actually sounding per zone: set by whoever strikes the zone, so a
+    // ringing tail keeps its own character when another zone gets a new voice
+    std::atomic<int>   padPatchZ[NZONES]{{0}, {0}, {0}, {0}, {0}};
     // punch-in FX bus (MIDI demo mode): momentary while held, act on the
     // whole vibration output — music chain and pads alike
     std::atomic<int>   fxStrobe{0};  // 9 Hz square gate
@@ -73,26 +95,65 @@ struct Params {
     std::atomic<float> fxTrem{0};    // tremolo depth 0..0.6 @ 5.5 Hz (mod wheel)
 };
 
-// Pad voice library — characters distilled from the ADAM stems.
-// The Whale Song's big moment measured: 26 Hz carrier + 52 Hz harmonic on all
-// zones at once, ~5.6x the mean level, slow ~0.2 Hz swell, long build, ~8 s
-// release. WHALE/QUAKE encode that; the others cover the calm end.
-enum PadPatch { PAD_PURE = 0, PAD_WHALE, PAD_QUAKE, PAD_HEART, PAD_PURR,
-                PAD_DROP, NPATCHES };
+// Pad voice library. Every voice is one row: a generic synth in engine.cpp
+// evaluates it (harmonic mix, breathing/tremolo AM, pitch envelope, rumble
+// noise, hold surge, special patterns). PAD voices are the originals distilled
+// from the ADAM stems (the Whale Song's big moment: 26 Hz carrier + 52 Hz
+// harmonic on every zone, slow ~0.2 Hz swell, long release). CINEMATIC are
+// epic sweeps and hits; DRUM are percussive one-shots meant to be rolled
+// head-to-toe by the VFX sequencer.
+enum PadCategory { CAT_PAD = 0, CAT_CINEMATIC, CAT_DRUM, NCATS };
+// vector glyphs drawn by the UI (main.cpp drawIcon) — one per voice / preset
+enum PadIcon { IC_SINE = 0, IC_WHALE, IC_ZIGZAG, IC_HEART, IC_TREMOLO, IC_DROP,
+               IC_RISER, IC_HORN, IC_BELL, IC_BURST, IC_BOLT, IC_TENSION,
+               IC_KICK, IC_TOM, IC_BOOM, IC_SNARE, IC_ROLL, IC_CLAP,
+               IC_UP, IC_DOWN, IC_RIPPLE, IC_BOUNCE, IC_ECG, IC_SWEEP, IC_STAIRS, IC_RISEDROP,
+               IC_STORM, IC_SLAM };
+enum PadShape { SHAPE_SINE = 0, SHAPE_LUBDUB, SHAPE_ROLL };
+enum PadPatch { PAD_PURE = 0, PAD_WHALE, PAD_QUAKE, PAD_HEART, PAD_PURR, PAD_DROP,
+                PAD_RISER, PAD_BRAAM, PAD_SWELL, PAD_IMPACT, PAD_THUNDER, PAD_TENSION,
+                PAD_KICK, PAD_TOM, PAD_BOOM, PAD_SNARE, PAD_ROLL, PAD_CLAP,
+                NPATCHES };
 struct PadPatchDef {
     const char* name;
-    float baseHz;   // <0 = follow the zone's live carrier
-    float atkS, relS;
+    int cat;
+    const char* hint;
+    float baseHz;       // <0 = follow the zone's live carrier / tuner
+    float atkS, relS;   // amplitude envelope
     float gain;
+    float h2;           // 2nd-harmonic mix 0..1
+    float amHz, amDepth;    // breathing / tremolo AM (depth 0..1)
+    float pitchMul0, pitchMul1, pitchTimeS; // pitch env: ×mul0 → ×mul1 over time
+    float noise;        // low-passed rumble noise mix 0..1
+    float surge;        // press-and-hold swell amount (0 = none)
+    int shape;          // special pattern
+    bool allZones;      // strike every zone at once (full-body voice)
+    int icon;           // PadIcon
 };
 static const PadPatchDef kPadPatches[NPATCHES] = {
-    {"PURE",  -1.0f, 0.006f, 0.25f, 0.85f},
-    {"WHALE", 26.0f, 2.2f,   1.8f,  1.15f}, // hold to build the surge
-    {"QUAKE", 26.0f, 0.03f,  0.5f,  1.25f}, // violent 7 Hz shake
-    {"HEART", 38.0f, 0.02f,  0.4f,  1.0f},  // lub-dub pattern
-    {"PURR",  45.0f, 0.08f,  0.35f, 0.7f},  // fast light tremolo
-    {"DROP",  -1.0f, 0.04f,  0.9f,  1.0f},  // pitch dive
+    // name      cat            hint                       base   atk    rel   gain  h2    amHz  amD   p0    p1   pT    noise surge shape         all
+    {"PURE",     CAT_PAD,       "clean tone, tuner pitch",   -1.f, 0.006f, 0.25f, 0.85f, 0.f,  0.f,  0.f,  1.f,  1.f, 0.f,  0.f,  0.5f, SHAPE_SINE,   false, IC_SINE},
+    {"WHALE",    CAT_PAD,       "hold to build the surge",   26.f, 2.2f,   1.8f,  1.15f, 0.45f, 0.22f, 0.44f, 1.f, 1.f, 0.f,  0.f,  0.5f, SHAPE_SINE,   true, IC_WHALE},
+    {"QUAKE",    CAT_PAD,       "violent 7 Hz shake",        26.f, 0.03f,  0.5f,  1.25f, 0.4f,  7.f,  0.7f,  1.f,  1.f, 0.f,  0.f,  0.5f, SHAPE_SINE,   false, IC_ZIGZAG},
+    {"HEART",    CAT_PAD,       "lub-dub every 0.9 s",       38.f, 0.02f,  0.4f,  1.0f,  0.f,   0.f,  0.f,   1.f,  1.f, 0.f,  0.f,  0.5f, SHAPE_LUBDUB, false, IC_HEART},
+    {"PURR",     CAT_PAD,       "fast light tremolo",        45.f, 0.08f,  0.35f, 0.7f,  0.f,   11.f, 0.7f,  1.f,  1.f, 0.f,  0.f,  0.5f, SHAPE_SINE,   false, IC_TREMOLO},
+    {"DROP",     CAT_PAD,       "pitch dive",                -1.f, 0.04f,  0.9f,  1.0f,  0.3f,  0.f,  0.f,   1.6f, 0.4f, 2.5f, 0.f,  0.5f, SHAPE_SINE,   false, IC_DROP},
+    // CINEMATIC — epic sweeps and hits
+    {"RISER",    CAT_CINEMATIC, "4 s climb while held",   60.f, 3.5f,   1.2f,  1.1f,  0.3f,  0.5f, 0.15f, 0.5f, 1.f, 4.0f, 0.25f, 0.9f, SHAPE_SINE,  false, IC_RISER},
+    {"BRAAM",    CAT_CINEMATIC, "horn, long tail",   36.f, 0.15f,  2.5f,  1.3f,  0.5f,  0.f,  0.f,   1.15f, 1.f, 0.8f, 0.15f, 0.3f, SHAPE_SINE, false, IC_HORN},
+    {"SWELL",    CAT_CINEMATIC, "slow bloom, slow fade",     40.f, 2.5f,   3.0f,  1.1f,  0.35f, 0.15f, 0.2f, 1.f,  1.f, 0.f,  0.f,   0.8f, SHAPE_SINE,  false, IC_BELL},
+    {"IMPACT",   CAT_CINEMATIC, "hit + rumble tail",         34.f, 0.005f, 2.2f,  1.35f, 0.4f,  0.f,  0.f,   1.8f, 1.f, 0.12f, 0.4f, 0.f,  SHAPE_SINE,  false, IC_BURST},
+    {"THUNDER",  CAT_CINEMATIC, "rolling rumble",            28.f, 0.3f,   3.0f,  1.2f,  0.2f,  3.3f, 0.35f, 1.f,  1.f, 0.f,  0.7f,  0.6f, SHAPE_SINE,  false, IC_BOLT},
+    {"TENSION",  CAT_CINEMATIC, "rising shimmer",   48.f, 1.5f,   0.6f,  0.9f,  0.f,   9.f,  0.5f,  0.85f, 1.f, 3.0f, 0.f,  0.7f, SHAPE_SINE,  false, IC_TENSION},
+    // DRUM — one-shots
+    {"KICK",     CAT_DRUM,      "tight punch",               55.f, 0.002f, 0.22f, 1.3f,  0.2f,  0.f,  0.f,   2.4f, 1.f, 0.05f, 0.f,  0.f,  SHAPE_SINE,  false, IC_KICK},
+    {"TOM",      CAT_DRUM,      "round thud",                62.f, 0.003f, 0.35f, 1.15f, 0.3f,  0.f,  0.f,   1.5f, 1.f, 0.09f, 0.f,  0.f,  SHAPE_SINE,  false, IC_TOM},
+    {"BOOM",     CAT_DRUM,      "deep floor hit",            32.f, 0.004f, 0.9f,  1.35f, 0.25f, 0.f,  0.f,   1.6f, 1.f, 0.08f, 0.2f, 0.f,  SHAPE_SINE,  false, IC_BOOM},
+    {"SNARE",    CAT_DRUM,      "noise crack",       78.f, 0.002f, 0.14f, 1.1f,  0.f,   0.f,  0.f,   1.3f, 1.f, 0.03f, 0.6f, 0.f,  SHAPE_SINE,  false, IC_SNARE},
+    {"ROLL",     CAT_DRUM,      "retriggers while held",   60.f, 0.01f, 0.2f,  1.0f,  0.2f,  0.f,  0.f,   1.3f, 1.f, 0.03f, 0.f,  0.f,  SHAPE_ROLL,  false, IC_ROLL},
+    {"CLAP",     CAT_DRUM,      "short noise slap",          70.f, 0.002f, 0.1f,  1.0f,  0.f,   0.f,  0.f,   1.f,  1.f, 0.f,  0.8f, 0.f,  SHAPE_SINE,  false, IC_CLAP},
 };
+static const char* kPadCategoryNames[NCATS] = {"PADS", "CINEMATIC", "DRUM"};
 
 struct Preset {
     const char* name;
@@ -149,8 +210,9 @@ private:
     // module D delay
     dsp::DelayLine sweepDelay_;
 
-    // output conditioning per zone
+    // output conditioning per zone: band-limited to what the hardware can move
     dsp::ButterLP zoneLP_[NZONES];
+    dsp::Biquad zoneHP_[NZONES];
     float zonePeak_[NZONES] = {1e-3f, 1e-3f, 1e-3f, 1e-3f, 1e-3f};
 
     // breath / macro-dynamics
@@ -176,8 +238,28 @@ private:
     // pad play state
     float padEnv_[NZONES] = {0};
     float padPhase_[NZONES] = {0};
+    float padNoiseLP_[NZONES] = {0};   // one-pole rumble noise per zone
+    uint32_t padRng_ = 0x9E3779B9u;
     float padT_[NZONES] = {0};      // seconds since strike (patch modulators)
     int padPrevGate_[NZONES] = {0};
+
+    // SPLIT mode state
+    dsp::BandPass splitSub_, splitBass_, splitKick_, splitSnare_;
+    dsp::EnvFollower splitSubF_, splitBassF_, splitVocF_, splitAirF_;
+    dsp::BandPass splitVocBand_, splitAirBand_;
+    dsp::Osc oscVoc_, oscAir_, oscKick_, oscSnare_;
+    dsp::Smooth vocHzSm_, airHzSm_;
+    float kickEnv_ = 0, snareEnv_ = 0;     // drum thump envelopes
+    float kickPitch_ = 0;                  // pitch-drop state for the thump
+    float splitPeak_[NZONES] = {1e-3f, 1e-3f, 1e-3f, 1e-3f, 1e-3f};
+    float vocGate_ = 0, airGate_ = 0;      // smoothed "is this layer present"
+    float prevBandOnset_[3] = {0, 0, 0};
+    // harmony (second partial → HEART) and low instruments 80-200 Hz (→ ROOT)
+    dsp::Osc oscHarm_, oscLow_;
+    dsp::Smooth harmHzSm_, lowHzSm_;
+    dsp::BandPass splitLowBand_;
+    dsp::EnvFollower splitLowF_, splitHarmF_;
+    float harmGate_ = 0, lowGate_ = 0;
 
     // punch-in FX state
     float fxG_ = 1.0f;       // smoothed strobe/choke gate

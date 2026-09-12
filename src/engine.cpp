@@ -25,7 +25,30 @@ void Engine::init() {
 
     sweepDelay_.init(32768); // > 300 ms @ 48k
 
-    for (int z = 0; z < NZONES; z++) zoneLP_[z].design(200.0f, kSR, 6);
+    for (int z = 0; z < NZONES; z++) {
+        zoneLP_[z].design(zoneHzMax(z), kSR, 6);
+        zoneHP_[z].highpass(zoneHzMin(z), kSR);
+    }
+
+    // SPLIT mode: real low bands pass straight to the body; the layers that
+    // live above the felt range are tracked and folded down
+    splitSub_.design(8, 50, kSR);      // true sub, only the ButtKicker can move it
+    splitBass_.design(40, 80, kSR);    // the bass line inside the ring band
+    splitKick_.design(40, 80, kSR);
+    splitSnare_.design(150, 400, kSR);
+    splitVocBand_.design(160, 900, kSR);
+    splitAirBand_.design(900, 6000, kSR);
+    splitSubF_.design(5, 60, kSR, 15.0f);
+    splitBassF_.design(5, 60, kSR, 15.0f);
+    splitVocF_.design(6, 90, kSR, 15.0f);
+    splitAirF_.design(4, 70, kSR, 15.0f);
+    vocHzSm_.design(0.06f, kSR); vocHzSm_.v = 55.0f;
+    airHzSm_.design(0.05f, kSR); airHzSm_.v = 70.0f;
+    harmHzSm_.design(0.09f, kSR); harmHzSm_.v = 48.0f;
+    lowHzSm_.design(0.08f, kSR); lowHzSm_.v = 50.0f;
+    splitLowBand_.design(80, 200, kSR);          // cello, low piano, low synth
+    splitLowF_.design(12, 220, kSR, 15.0f);      // slower: these are sustained
+    splitHarmF_.design(25, 350, kSR, 15.0f);     // chords/strings bloom, not snap
     for (int i = 0; i < NZONES + 2; i++) meter[i].store(0);
     for (int z = 0; z < NZONES; z++) zoneHz[z].store(55.0f);
     for (int z = 0; z < NZONES; z++) {
@@ -104,17 +127,19 @@ void Engine::process(const float* inL, const float* inR, float** out, int n) {
     // pad play (octagon controller): snapshot per block
     float padHzS[NZONES], padVelS[NZONES];
     int padGateS[NZONES];
-    const int patch = std::min(std::max(params.padPatch.load(), 0), NPATCHES - 1);
-    const PadPatchDef& pd = kPadPatches[patch];
+    const PadPatchDef* pdz[NZONES];
+    float padAtkZ[NZONES], padRelZ[NZONES];
     for (int z = 0; z < NZONES; z++) {
+        int patch = std::min(std::max(params.padPatchZ[z].load(), 0), NPATCHES - 1);
+        pdz[z] = &kPadPatches[patch];
+        padAtkZ[z] = std::exp(-1.0f / (pdz[z]->atkS * kSR));
+        padRelZ[z] = std::exp(-1.0f / (pdz[z]->relS * kSR));
         padGateS[z] = params.padGate[z].load();
         padHzS[z] = params.padHz[z].load();
         padVelS[z] = params.padVel[z].load();
         if (padGateS[z] && !padPrevGate_[z]) padT_[z] = 0; // new strike
         padPrevGate_[z] = padGateS[z];
     }
-    const float padAtk = std::exp(-1.0f / (pd.atkS * kSR));
-    const float padRel = std::exp(-1.0f / (pd.relS * kSR));
 
     // no sound at open: hold silent 0.6 s while followers settle, fade in 0.9 s
     const long warmHold = (long)(0.6f * kSR);
@@ -124,6 +149,11 @@ void Engine::process(const float* inL, const float* inR, float** out, int n) {
     // one smoothed gain (~8 ms) so edges thump instead of clicking
     const int fxStrobeOn = params.fxStrobe.load();
     const int fxChokeOn = params.fxChoke.load();
+    const bool splitMode = params.engineMode.load() == 1;
+    // Lift: e^(1-0.6·lift) — a soft upward expander on normalized envelopes.
+    // Transient layers (kick, snare) never pass through it, so punch stays.
+    const float liftExp = 1.0f - 0.6f * std::min(1.0f, std::max(0.0f, params.lift.load()));
+    auto lifted = [liftExp](float e) { return e > 1e-4f ? std::pow(e, liftExp) : 0.0f; };
     const float fxTremD = params.fxTrem.load();
     const float fxCoef = std::exp(-1.0f / (0.008f * kSR));
 
@@ -226,7 +256,7 @@ void Engine::process(const float* inL, const float* inR, float** out, int n) {
         // oscillators
         float carrier = oscMid_.tick(freq, kSR);
         float sub = oscSub_.tick(subFreq, kSR);
-        float high = oscHigh_.tick(highFreq <= 200.0f ? highFreq : freq, kSR);
+        float high = oscHigh_.tick(highFreq <= zoneHzMax(HEAD) ? highFreq : freq, kSR);
         float feetOsc = oscFeet_.tick(feetFreq, kSR);
 
         // warmth: phase-coherent harmonics of the mid carrier (<=200 Hz)
@@ -291,17 +321,100 @@ void Engine::process(const float* inL, const float* inR, float** out, int n) {
             tremG = 1.0f - fxTremD * 0.5f * (1.0f + std::sin(tremPh_));
         }
 
+        // ── SPLIT: five layers of the song, one per zone ──
+        float split[NZONES] = {0, 0, 0, 0, 0};
+        if (splitMode) {
+            // real bass, felt directly
+            float subSig = splitSub_.process(mono);
+            float bassSig = splitBass_.process(mono);
+            float subE = splitSubF_.process(subSig);
+            float bassE = splitBassF_.process(bassSig);
+            // drums: the kick band's transient, and the snare band's, each
+            // shaped into a thump with a pitch drop so hits read as hits
+            float kickOn = analyzer.out.bandOnset[0].load();
+            float snareOn = analyzer.out.bandOnset[1].load();
+            if (kickOn > 0.55f && kickOn > prevBandOnset_[0] + 0.15f) { kickEnv_ = std::max(kickEnv_, kickOn); kickPitch_ = 1.0f; }
+            if (snareOn > 0.6f && snareOn > prevBandOnset_[1] + 0.2f) snareEnv_ = std::max(snareEnv_, snareOn * 0.8f);
+            prevBandOnset_[0] = kickOn; prevBandOnset_[1] = snareOn;
+            kickEnv_ *= 1.0f - 1.0f / (0.09f * kSR);
+            snareEnv_ *= 1.0f - 1.0f / (0.05f * kSR);
+            kickPitch_ *= 1.0f - 1.0f / (0.04f * kSR);
+            // kick thump: 42 Hz with a drop from 72 Hz, all inside the ring band
+            float kick = oscKick_.tick(42.0f * (1.0f + 0.7f * kickPitch_), kSR) * kickEnv_;
+            float snare = oscSnare_.tick(72.0f, kSR) * snareEnv_;
+            // vocal / chord layer: its own partial, folded into 45..90 Hz
+            float vocHzRaw = analyzer.out.bandPeakHz[1].load();
+            float airHzRaw = analyzer.out.bandPeakHz[2].load();
+            auto fold = [](float hz, float lo, float hi) {
+                if (hz <= 1.0f) return lo;
+                while (hz > hi) hz *= 0.5f;
+                while (hz < lo) hz *= 2.0f;
+                return hz;
+            };
+            // ── HEAD = the voice. Strongest partial of the vocal band (160-900),
+            // folded into the head's sweet band; its weight follows the vocal
+            // band's envelope, boosted by the 0.9-6 kHz presence that a voice
+            // has and a piano chord mostly doesn't ──
+            float vocHz = vocHzSm_.tick(fold(vocHzRaw, 45.0f, 80.0f));
+            float vocE = lifted(splitVocF_.process(splitVocBand_.process(mono)));
+            float airE = lifted(splitAirF_.process(splitAirBand_.process(mono)));
+            float vocPres = analyzer.out.bandPeakMag[1].load();
+            vocGate_ += ((vocPres > 0.18f ? 1.0f : 0.0f) - vocGate_) * (1.0f / (0.08f * kSR));
+            float voice = (std::sin(oscVoc_.phase) + 0.35f * oscVoc_.harmonic(2)) / 1.35f
+                          * vocE * (0.55f + 0.75f * airE) * vocGate_;
+            oscVoc_.tick(vocHz, kSR);
+            // ── HEART = the harmony. Second partial of the same band (a different
+            // note from the voice: the chord, strings, piano under it), slow
+            // bloom so sustained instruments swell rather than tick ──
+            float harmHzRaw = analyzer.out.bandPeak2Hz[1].load();
+            float harmHz = harmHzSm_.tick(fold(harmHzRaw, 35.0f, 70.0f));
+            float harmE = lifted(splitHarmF_.process(splitVocBand_.process(mono)));
+            float harmPres = analyzer.out.bandPeak2Mag[1].load();
+            harmGate_ += ((harmPres > 0.14f ? 1.0f : 0.0f) - harmGate_) * (1.0f / (0.15f * kSR));
+            float harm = (std::sin(oscHarm_.phase) + 0.25f * oscHarm_.harmonic(2)) / 1.25f * harmE * harmGate_;
+            oscHarm_.tick(harmHz, kSR);
+            // ── ROOT also carries the low instruments (80-200 Hz: cello, low
+            // piano, low synth) that the rings cannot reproduce directly:
+            // folded down, lifted, so a quiet low line is still felt ──
+            float lowHzRaw = analyzer.out.bandPeakHz[0].load();
+            float lowHz = lowHzSm_.tick(fold(lowHzRaw, 30.0f, 65.0f));
+            float lowE = lifted(splitLowF_.process(splitLowBand_.process(mono)));
+            float lowPres = analyzer.out.bandPeakMag[0].load();
+            lowGate_ += ((lowPres > 0.15f ? 1.0f : 0.0f) - lowGate_) * (1.0f / (0.12f * kSR));
+            float low = std::sin(oscLow_.phase) * lowE * lowGate_;
+            oscLow_.tick(lowHz, kSR);
+            // sub and bass line pass straight through, gently lifted at the send
+            float subLift = 0.7f + 0.6f * lifted(subE);
+            float bassLift = 0.7f + 0.6f * lifted(bassE);
+            split[FEET]  = subSig * 3.2f * subLift + bassSig * 0.4f;
+            split[ROOT]  = bassSig * 2.6f * bassLift + low * 1.3f + subSig * 0.5f;
+            split[BELLY] = kick * 1.5f + bassSig * 0.5f * bassE;
+            split[HEART] = harm * 1.5f + kick * 0.3f;
+            split[HEAD]  = voice * 1.8f + snare * 0.7f;
+            if ((i & 1023) == 0) {
+                zoneHz[HEART].store(harmHz);
+                zoneHz[HEAD].store(vocHz);
+            }
+        }
+
         // ── mix per zone ──
         for (int z = 0; z < NZONES; z++) {
             int d = maxDelay > 0 ? (z * maxDelay) / 4 : 0;
             float sweep = d > 0 ? sweepDelay_.tap(d) : sweepBase;
-            float s = foundation * 0.4f
-                    + pulses * pulseW[z] * 0.5f
-                    + ((z == HEAD || z == BELLY || z == FEET) ? entA : entB) * 0.35f
-                    + sweep * bodyFlow * 0.3f
-                    + accents[z] * spread * 0.3f;
+            float s;
+            if (splitMode) {
+                // the layer itself, plus a little of the shared pulse so the
+                // whole body still agrees on the downbeat
+                s = split[z] + pulses * pulseW[z] * 0.15f + sweep * bodyFlow * 0.12f;
+            } else {
+                s = foundation * 0.4f
+                  + pulses * pulseW[z] * 0.5f
+                  + ((z == HEAD || z == BELLY || z == FEET) ? entA : entB) * 0.35f
+                  + sweep * bodyFlow * 0.3f
+                  + accents[z] * spread * 0.3f;
+            }
             s *= zoneLevel[z];
-            s = zoneLP_[z].process(s);
+            s = zoneLP_[z].process(zoneHP_[z].process(s));
 
             // gentle running-peak calibration (slow, low max gain, so it can't
             // fight the song's dynamics), then the breath gain rides on top
@@ -317,52 +430,50 @@ void Engine::process(const float* inL, const float* inR, float** out, int n) {
             // pad play rides on top of the music chain (not through breath/AGC,
             // so the octagon is playable even in total silence)
             {
+                const PadPatchDef& pd = *pdz[z];
+                const float padAtk = padAtkZ[z], padRel = padRelZ[z];
                 float target = 0.0f;
                 if (padGateS[z]) {
                     // press-and-hold intensifies: swell to ~1.7x over ~3 s,
                     // so a tap is gentle and a long hold gets heavy
                     float surge = std::min(padT_[z] / 3.0f, 1.0f);
-                    target = padVelS[z] * (0.7f + 0.5f * surge);
+                    target = padVelS[z] * (0.7f + pd.surge * surge);
                 }
                 float coef = target > padEnv_[z] ? padAtk : padRel;
                 padEnv_[z] = coef * (padEnv_[z] - target) + target;
                 if (padEnv_[z] > 1e-4f) {
                     float t = padT_[z];
                     if (padGateS[z]) padT_[z] += 1.0f / kSR;
+                    // pitch envelope: ×mul0 → ×mul1 over pitchTimeS (exponential)
                     float f = padHzS[z];
-                    if (patch == PAD_DROP) // dive: 1.6x down to 0.4x over ~2.5 s
-                        f *= 1.6f * std::pow(2.0f, -std::min(t, 2.5f) / 1.25f);
+                    if (pd.pitchTimeS > 0.0f) {
+                        float k = std::min(t / pd.pitchTimeS, 1.0f);
+                        f *= pd.pitchMul0 * std::pow(pd.pitchMul1 / pd.pitchMul0, k);
+                    }
                     padPhase_[z] += 2.0f * dsp::kPi * f / kSR;
                     if (padPhase_[z] > 2.0f * dsp::kPi) padPhase_[z] -= 2.0f * dsp::kPi;
                     float ph = padPhase_[z];
-                    float y;
-                    switch (patch) {
-                        case PAD_WHALE: // carrier + 2nd harmonic, slow breathing AM
-                            y = (std::sin(ph) + 0.45f * std::sin(2 * ph)) / 1.45f
-                                * (0.78f + 0.22f * std::sin(2 * dsp::kPi * 0.22f * t));
-                            break;
-                        case PAD_QUAKE: { // deep fast tremolo = the shake
-                            float trem = 1.0f - 0.7f * (0.5f + 0.5f *
-                                std::sin(2 * dsp::kPi * 7.0f * t));
-                            y = (std::sin(ph) + 0.4f * std::sin(2 * ph)) / 1.4f * trem;
-                            break;
-                        }
-                        case PAD_HEART: { // lub-dub each 0.9 s
-                            float cyc = std::fmod(t, 0.9f);
-                            float e = std::exp(-cyc / 0.07f);
-                            if (cyc > 0.16f) e += 0.75f * std::exp(-(cyc - 0.16f) / 0.05f);
-                            y = std::sin(ph) * std::min(e, 1.0f);
-                            break;
-                        }
-                        case PAD_PURR:
-                            y = std::sin(ph) * (0.65f + 0.35f *
-                                std::sin(2 * dsp::kPi * 11.0f * t));
-                            break;
-                        case PAD_DROP:
-                            y = (std::sin(ph) + 0.3f * std::sin(2 * ph)) / 1.3f;
-                            break;
-                        default:
-                            y = std::sin(ph);
+                    // harmonic mix
+                    float y = (std::sin(ph) + pd.h2 * std::sin(2 * ph)) / (1.0f + pd.h2);
+                    // rumble: white noise through a one-pole ~90 Hz lowpass
+                    if (pd.noise > 0.0f) {
+                        padRng_ ^= padRng_ << 13; padRng_ ^= padRng_ >> 17; padRng_ ^= padRng_ << 5;
+                        float wn = ((padRng_ >> 8) * (1.0f / 8388608.0f)) - 1.0f;
+                        padNoiseLP_[z] += 0.0118f * (wn - padNoiseLP_[z]);
+                        y = y * (1.0f - 0.6f * pd.noise) + pd.noise * 6.0f * padNoiseLP_[z];
+                    }
+                    // breathing / tremolo AM
+                    if (pd.amHz > 0.0f)
+                        y *= 1.0f - pd.amDepth * (0.5f + 0.5f * std::sin(2 * dsp::kPi * pd.amHz * t));
+                    // special patterns
+                    if (pd.shape == SHAPE_LUBDUB) { // lub-dub each 0.9 s
+                        float cyc = std::fmod(t, 0.9f);
+                        float e = std::exp(-cyc / 0.07f);
+                        if (cyc > 0.16f) e += 0.75f * std::exp(-(cyc - 0.16f) / 0.05f);
+                        y *= std::min(e, 1.0f);
+                    } else if (pd.shape == SHAPE_ROLL) { // 11 Hz retrigger
+                        float cyc = std::fmod(t, 1.0f / 11.0f);
+                        y *= std::exp(-cyc / 0.04f);
                     }
                     o += pd.gain * intensity * padEnv_[z] * y;
                 }
@@ -378,8 +489,10 @@ void Engine::process(const float* inL, const float* inR, float** out, int n) {
         warmup_++;
 
         if ((i & 1023) == 0) {
-            zoneHz[HEAD].store(highFreq <= 200.0f ? highFreq : freq);
-            zoneHz[HEART].store(freq);
+            if (!splitMode) {
+                zoneHz[HEAD].store(highFreq <= zoneHzMax(HEAD) ? highFreq : freq);
+                zoneHz[HEART].store(freq);
+            }
             zoneHz[BELLY].store(freq);
             zoneHz[ROOT].store(subFreq);
             zoneHz[FEET].store(feetFreq);

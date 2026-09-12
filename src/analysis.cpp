@@ -111,6 +111,60 @@ void StreamAnalyzer::processHop() {
             flux += d * (f < 300.0f ? 1.0f : 300.0f / f);
         }
     }
+    // ── SPLIT: per-band strongest partial + per-band flux ──
+    {
+        static const float lo[3] = {40.0f, 160.0f, 900.0f};
+        static const float hi[3] = {160.0f, 900.0f, 6000.0f};
+        for (int b = 0; b < 3; b++) {
+            int i0 = std::max(1, (int)(lo[b] / fluxBinHz)), i1 = std::min(kFFT / 2 - 2, (int)(hi[b] / fluxBinHz));
+            int best = i0; float bm = 0, bflux = 0;
+            for (int i = i0; i <= i1; i++) {
+                // tilt so the higher bands don't always pick their lowest bin
+                float wgt = mag_[i] * std::sqrt((float)i / i0);
+                if (wgt > bm) { bm = wgt; best = i; }
+                float d = mag_[i] - prevMag_[i];
+                if (d > 0) bflux += d;
+            }
+            float m = mag_[best];
+            // parabolic interpolation around the peak bin
+            float a = mag_[best - 1], c = mag_[best + 1];
+            float den = a - 2 * m + c;
+            float off = std::fabs(den) > 1e-9f ? 0.5f * (a - c) / den : 0.0f;
+            float hz = (best + std::max(-0.5f, std::min(0.5f, off))) * fluxBinHz;
+            bandMagMax_[b] = std::max(m, bandMagMax_[b] * 0.9993f); // ~15 s at hop rate
+            float rel = m / bandMagMax_[b];
+            // only accept a new pitch when the partial is real, else hold the last
+            if (rel > 0.12f) {
+                float target = hz;
+                // reject single-hop octave-ish jumps unless they persist (light smoothing)
+                bandHzSm_[b] += (target - bandHzSm_[b]) * 0.35f;
+            }
+            out.bandPeakHz[b].store(bandHzSm_[b]);
+            out.bandPeakMag[b].store(std::min(1.0f, rel));
+            // second partial: strongest bin at least ±12% (a whole tone) from the first
+            {
+                int best2 = -1; float bm2 = 0;
+                for (int i = i0; i <= i1; i++) {
+                    if (std::fabs((float)i - best) < best * 0.12f) continue;
+                    float wgt = mag_[i] * std::sqrt((float)i / i0);
+                    if (wgt > bm2) { bm2 = wgt; best2 = i; }
+                }
+                if (best2 > 0) {
+                    float m2 = mag_[best2];
+                    float a2 = mag_[best2 - 1], c2 = mag_[best2 + 1];
+                    float den2 = a2 - 2 * m2 + c2;
+                    float off2 = std::fabs(den2) > 1e-9f ? 0.5f * (a2 - c2) / den2 : 0.0f;
+                    float hz2 = (best2 + std::max(-0.5f, std::min(0.5f, off2))) * fluxBinHz;
+                    float rel2 = m2 / bandMagMax_[b];
+                    if (rel2 > 0.10f) bandHz2Sm_[b] += (hz2 - bandHz2Sm_[b]) * 0.3f;
+                    out.bandPeak2Hz[b].store(bandHz2Sm_[b]);
+                    out.bandPeak2Mag[b].store(std::min(1.0f, rel2));
+                }
+            }
+            bandFluxMax_[b] = std::max(bflux, bandFluxMax_[b] * 0.9995f);
+            out.bandOnset[b].store(bflux / bandFluxMax_[b]);
+        }
+    }
     std::memcpy(prevMag_.data(), mag_.data(), sizeof(float) * kFFT / 2);
 
     fluxHist_[fluxW_] = flux;

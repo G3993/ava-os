@@ -17,6 +17,17 @@ struct AnalyzerOut {
     std::atomic<int>   keyIndex{9};        // 0=C .. 11=B (9=A)
     std::atomic<int>   keyMinor{0};
     std::atomic<float> onsetFlash{0.0f};   // decaying UI indicator
+    // SPLIT mode: strongest partial per musical layer, each hop (~10 ms).
+    // Bands: 0 bass 40-160 · 1 vocal/chord 160-900 · 2 melody/air 900-6000.
+    // peakHz = parabolic-interpolated bin centre; peakMag = relative strength
+    // 0..1 vs that band's slow running max (so quiet layers still track).
+    std::atomic<float> bandPeakHz[3]{{55.0f}, {220.0f}, {1760.0f}};
+    std::atomic<float> bandPeakMag[3]{{0.0f}, {0.0f}, {0.0f}};
+    std::atomic<float> bandOnset[3]{{0.0f}, {0.0f}, {0.0f}}; // per-band flux, normalized
+    // second-strongest partial per band (at least a whole tone away from the
+    // first): the harmony under the melody, for the HEART layer
+    std::atomic<float> bandPeak2Hz[3]{{82.0f}, {330.0f}, {2640.0f}};
+    std::atomic<float> bandPeak2Mag[3]{{0.0f}, {0.0f}, {0.0f}};
 };
 
 class StreamAnalyzer {
@@ -64,6 +75,11 @@ private:
 
     // chroma
     float chroma_[12] = {0};
+    // per-band peak tracking
+    float bandMagMax_[3] = {1e-4f, 1e-4f, 1e-4f};
+    float bandFluxMax_[3] = {1e-4f, 1e-4f, 1e-4f};
+    float bandHzSm_[3] = {55.0f, 220.0f, 1760.0f};
+    float bandHz2Sm_[3] = {82.0f, 330.0f, 2640.0f};
 
     int hopsSinceTempo_ = 0, hopsSinceKey_ = 0;
     int samplePos_ = 0;
