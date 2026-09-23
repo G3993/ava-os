@@ -45,6 +45,12 @@ public:
     // located by feel. <0 = idle. Cleared by the audio thread when done.
     std::atomic<int> pingChan{-1};
     void ping(int c) { pingLeft_.store(43200); pingChan.store(c); }
+    // optional second stereo ring (live input from the interface); summed
+    // with the tap before the engine. Set by the app, may be null.
+    StereoRing* inRing = nullptr;
+    // live input goes to the ENGINE only by default (felt, not heard); on =
+    // also mixed into the music / surround sends
+    std::atomic<bool> inToSpeakers{false};
     std::atomic<int> pingLeft_{0}; // samples remaining (audio thread owned)
     float pingPhase_ = 0;
     // thermal guard state per device channel (zone channels only): running

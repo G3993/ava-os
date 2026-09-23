@@ -75,15 +75,33 @@ static OSStatus renderCB(void* inRefCon, AudioUnitRenderActionFlags*,
     // skip ahead to ~target so felt vibration stays in sync with heard sound.
     {
         StereoRing* ring = self->ring();
-        int target = n + 512; // ≈ block + ~10.7 ms
+        int target = n + 128; // ≈ block + ~2.7 ms: as tight as the tap allows
         int avail = ring->available();
         if (avail > target + 2 * n) ring->discard(avail - target);
     }
     self->ring()->pop(L.data(), R.data(), n);
+    // what the speakers get: the tap alone unless the input is routed there
+    static thread_local std::vector<float> mL, mR;
+    mL.assign(L.begin(), L.begin() + n); mR.assign(R.begin(), R.begin() + n);
+    if (StereoRing* ir = self->inRing) {
+        // keep the live input tight too, then add it on top of the tap
+        int avail = ir->available();
+        if (avail > n + 128 + 2 * n) ir->discard(avail - (n + 128));
+        static thread_local std::vector<float> iL, iR;
+        iL.assign(n, 0.0f); iR.assign(n, 0.0f);
+        if (avail >= n) {
+            ir->pop(iL.data(), iR.data(), n);
+            bool hear = self->inToSpeakers.load();
+            for (int i = 0; i < n; i++) {
+                L[i] += iL[i]; R[i] += iR[i];
+                if (hear) { mL[i] += iL[i]; mR[i] += iR[i]; }
+            }
+        }
+    }
     eng->process(L.data(), R.data(), vibPtr, n);
 
     AudioBuffer& b = ioData->mBuffers[0];
-    mixOutputBlock(self, eng, L.data(), R.data(), vibPtr, (float*)b.mData, n,
+    mixOutputBlock(self, eng, mL.data(), mR.data(), vibPtr, (float*)b.mData, n,
                    (int)b.mNumberChannels);
     return noErr;
 }
@@ -152,7 +170,7 @@ bool OutputUnit::start(unsigned deviceID, Engine* engine, StereoRing* ring) {
 
     {
         // small IO buffer for low output latency (~5.8 ms @ 44.1k)
-        UInt32 bufFrames = 256;
+        UInt32 bufFrames = 128;
         AudioObjectPropertyAddress bufAddr = {kAudioDevicePropertyBufferFrameSize,
                                               kAudioObjectPropertyScopeOutput,
                                               kAudioObjectPropertyElementMain};

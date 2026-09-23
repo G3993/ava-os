@@ -70,7 +70,11 @@ bool SystemTap::start(StereoRing* ring) {
             [[CATapDescription alloc] initStereoGlobalTapButExcludeProcesses:excluded];
         desc.name = @"AVASystemTap";
         desc.privateTap = YES;
-        desc.muteBehavior = CATapUnmuted;
+        // Mute the source apps while tapped: the speakers then hear AVA OS's
+        // copy, which leaves the interface in the same render as the
+        // vibration — felt and heard land together instead of the direct
+        // playback arriving one buffer ahead of the bed.
+        desc.muteBehavior = CATapMutedWhenTapped;
 
         AudioObjectID tapID = kAudioObjectUnknown;
         OSStatus err = AudioHardwareCreateProcessTap(desc, &tapID);

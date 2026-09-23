@@ -5,6 +5,7 @@
 #pragma once
 #include <atomic>
 #include <vector>
+#include "dsp.h"
 #ifdef __APPLE__
 #include <Accelerate/Accelerate.h>
 #else
@@ -28,12 +29,21 @@ struct AnalyzerOut {
     // first): the harmony under the melody, for the HEART layer
     std::atomic<float> bandPeak2Hz[3]{{82.0f}, {330.0f}, {2640.0f}};
     std::atomic<float> bandPeak2Mag[3]{{0.0f}, {0.0f}, {0.0f}};
+    // LOWEST PITCH. The fundamental of the lowest note sounding (25-250 Hz),
+    // measured in the time domain (YIN on a 180 Hz-lowpassed 6 kHz copy):
+    // the actual period of the bass, not a spectral-peak or key guess.
+    // rootHz = f0 x 2 — the note the bed is tuned to. f0Conf 0..1 = how
+    // clearly periodic the low end is right now (0 = no low end / noise).
+    // f0Hz holds the last confident note through kicks, rests and noise.
+    std::atomic<float> f0Hz{55.0f};
+    std::atomic<float> rootHz{110.0f};
+    std::atomic<float> f0Conf{0.0f};
 };
 
 class StreamAnalyzer {
 public:
     static constexpr int kFFT = 2048;
-    static constexpr int kHop = 512;
+    static constexpr int kHop = 256;   // ~5.3 ms: onsets land twice as fast
 
     void init(float sampleRate);
     ~StreamAnalyzer();
@@ -83,4 +93,18 @@ private:
 
     int hopsSinceTempo_ = 0, hopsSinceKey_ = 0;
     int samplePos_ = 0;
+
+    // lowest-pitch tracker (runs on a decimated copy, evaluated every ~11 ms)
+    static constexpr int kLowDecim = 8;                     // 48k -> 6k
+    static constexpr int kLowRing = 1024;
+    static constexpr int kYinW = 512;                       // 85 ms window
+    static constexpr int kYinLagMin = 24, kYinLagMax = 240; // 250 .. 25 Hz @ 6k
+    static constexpr int kLowEvalEvery = 64;                // decimated samples
+    void evalLowPitch();
+    dsp::ButterLP lowAA_, lowAA2_;   // 12th-order 180 Hz: the bass, alone
+    std::vector<float> lowRing_;
+    int lowDecimCount_ = 0, lowW_ = 0, lowSinceEval_ = 0;
+    float lowRms_ = 0, lowRmsMax_ = 1e-6f;
+    float f0Cand_ = 0; int f0CandN_ = 0;
+    float f0Held_ = 55.0f;
 };

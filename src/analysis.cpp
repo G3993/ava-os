@@ -53,6 +53,16 @@ void StreamAnalyzer::init(float sampleRate) {
     int histLen = (int)(8.0f * sr_ / kHop);
     fluxHist_.assign(histLen, 0.0f);
     fluxW_ = 0; fluxCount_ = 0;
+
+    // lowest pitch: isolate the bass with a 12th-order 180 Hz lowpass (a
+    // vocal at 330 Hz is 60 dB down, so it cannot bend the period; this also
+    // anti-aliases the 6 kHz copy), then keep every 8th sample
+    lowAA_.design(180.0f, sr_, 6);
+    lowAA2_.design(180.0f, sr_, 6);
+    lowRing_.assign(kLowRing, 0.0f);
+    lowDecimCount_ = lowW_ = lowSinceEval_ = 0;
+    lowRms_ = 0; lowRmsMax_ = 1e-6f;
+    f0Cand_ = 0; f0CandN_ = 0; f0Held_ = 55.0f;
 }
 
 StreamAnalyzer::~StreamAnalyzer() {
@@ -66,6 +76,16 @@ float StreamAnalyzer::pushSample(float x) {
     monoW_ = (monoW_ + 1) % kFFT;
     samplesSinceOnset_++;
     samplePos_++;
+
+    // lowest-pitch tracker feed
+    float lp = lowAA2_.process(lowAA_.process(x));
+    if (++lowDecimCount_ >= kLowDecim) {
+        lowDecimCount_ = 0;
+        lowRing_[lowW_] = lp;
+        lowW_ = (lowW_ + 1) % kLowRing;
+        lowRms_ += (lp * lp - lowRms_) * (1.0f / 300.0f); // ~50 ms mean-square
+        if (++lowSinceEval_ >= kLowEvalEvery) { lowSinceEval_ = 0; evalLowPitch(); }
+    }
 
     float onset = 0.0f;
     if (++hopCount_ >= kHop) {
@@ -131,7 +151,7 @@ void StreamAnalyzer::processHop() {
             float den = a - 2 * m + c;
             float off = std::fabs(den) > 1e-9f ? 0.5f * (a - c) / den : 0.0f;
             float hz = (best + std::max(-0.5f, std::min(0.5f, off))) * fluxBinHz;
-            bandMagMax_[b] = std::max(m, bandMagMax_[b] * 0.9993f); // ~15 s at hop rate
+            bandMagMax_[b] = std::max(m, bandMagMax_[b] * 0.99965f); // ~15 s at hop rate
             float rel = m / bandMagMax_[b];
             // only accept a new pitch when the partial is real, else hold the last
             if (rel > 0.12f) {
@@ -161,7 +181,7 @@ void StreamAnalyzer::processHop() {
                     out.bandPeak2Mag[b].store(std::min(1.0f, rel2));
                 }
             }
-            bandFluxMax_[b] = std::max(bflux, bandFluxMax_[b] * 0.9995f);
+            bandFluxMax_[b] = std::max(bflux, bandFluxMax_[b] * 0.99975f);
             out.bandOnset[b].store(bflux / bandFluxMax_[b]);
         }
     }
@@ -170,7 +190,7 @@ void StreamAnalyzer::processHop() {
     fluxHist_[fluxW_] = flux;
     fluxW_ = (fluxW_ + 1) % (int)fluxHist_.size();
     if (fluxCount_ < (int)fluxHist_.size()) fluxCount_++;
-    fluxRunMax_ = std::max(flux, fluxRunMax_ * 0.9995f);
+    fluxRunMax_ = std::max(flux, fluxRunMax_ * 0.99975f);
 
     // onset: flux above mean + 1.5*std of the last ~1 s, refractory 90 ms
     int lookback = std::min(fluxCount_, (int)(1.0f * sr_ / kHop));
@@ -221,7 +241,7 @@ void StreamAnalyzer::processHop() {
         int pc = (int)std::lround(12.0f * std::log2(f / 16.3515978313f)) % 12; // C0 ref
         chroma_[pc] += mag_[i];
     }
-    for (int i = 0; i < 12; i++) chroma_[i] *= 0.995f;
+    for (int i = 0; i < 12; i++) chroma_[i] *= 0.9975f;
 
     if (++hopsSinceTempo_ >= (int)(2.0f * sr_ / kHop)) { hopsSinceTempo_ = 0; updateTempo(); }
     if (++hopsSinceKey_ >= (int)(0.5f * sr_ / kHop)) { hopsSinceKey_ = 0; updateKey(); }
@@ -274,4 +294,79 @@ void StreamAnalyzer::updateKey() {
     out.keyIndex.store(bestKey);
     out.keyMinor.store(bestMinor);
     out.midOctaveHz.store(transposeToMidOctave(noteToHzOct1(bestKey)));
+}
+
+// ── lowest pitch ──
+// YIN (de Cheveigne & Kawahara) on the 6 kHz low-end copy. The cumulative-
+// mean-normalized difference function dips at the waveform's period and at
+// its multiples; taking the SMALLEST lag that dips under the threshold gives
+// the true period — deeper dips at 2T, 3T are sub-octave errors, and a lag
+// half of T would need the wave to repeat twice as fast, which a bass note
+// with harmonics does not. So the answer is the fundamental of the lowest
+// note present, however bright its timbre, and it never guesses an octave.
+void StreamAnalyzer::evalLowPitch() {
+    const float fsLow = sr_ / kLowDecim;
+    const int need = kYinW + kYinLagMax;
+    float x[kYinW + kYinLagMax];
+    int start = (lowW_ - need + kLowRing) % kLowRing;
+    for (int i = 0; i < need; i++) x[i] = lowRing_[(start + i) % kLowRing];
+
+    // level gate: no low end (or digital silence) -> hold the last note
+    lowRmsMax_ = std::max(lowRms_, lowRmsMax_ * 0.9995f); // ~20 s at 94 evals/s
+    float rel = lowRmsMax_ > 1e-12f ? std::sqrt(lowRms_ / lowRmsMax_) : 0.0f;
+    if (lowRms_ < 1e-9f || rel < 0.06f) { out.f0Conf.store(0.0f); f0CandN_ = 0; return; }
+
+    float d[kYinLagMax + 1];
+    d[0] = 1.0f;
+    float run = 0.0f;
+    for (int tau = 1; tau <= kYinLagMax; tau++) {
+        float acc = 0.0f;
+        const float* a = x;
+        const float* b = x + tau;
+        for (int j = 0; j < kYinW; j++) { float df = a[j] - b[j]; acc += df * df; }
+        run += acc;
+        d[tau] = run > 1e-12f ? acc * (float)tau / run : 1.0f;
+    }
+    // the deepest dip sets the bar; the answer is the FIRST dip that comes
+    // within 0.08 of it (walked to its bottom). Dips at 2T, 3T are never
+    // deeper than the one at T, so this lands on the fundamental; a dip at
+    // T/2 from a bright timbre is much shallower and is skipped
+    int best = -1;
+    float dmin = 1e9f;
+    for (int tau = kYinLagMin; tau < kYinLagMax; tau++) dmin = std::min(dmin, d[tau]);
+    const float bar = std::min(0.5f, std::max(0.15f, dmin + 0.08f));
+    for (int tau = kYinLagMin; tau < kYinLagMax; tau++) {
+        if (d[tau] < bar) {
+            while (tau + 1 < kYinLagMax && d[tau + 1] < d[tau]) tau++;
+            best = tau;
+            break;
+        }
+    }
+    if (best < 0) best = kYinLagMin; // unreachable (dmin itself is under the bar)
+    float conf = std::max(0.0f, 1.0f - d[best]);
+    // parabolic refinement of the period (sub-sample: ~0.3 Hz at 55 Hz)
+    float pa = d[best - 1], pb = d[best], pc = d[best + 1];
+    float den = pa - 2.0f * pb + pc;
+    float off = std::fabs(den) > 1e-9f ? 0.5f * (pa - pc) / den : 0.0f;
+    float period = (float)best + std::max(-0.5f, std::min(0.5f, off));
+    float hz = fsLow / period;
+    out.f0Conf.store(conf);
+    // Through a kick, the estimate wobbles by about a semitone at confidence
+    // 0.6-0.8; the real note moves arrive at 0.9+. So only clean readings
+    // move the note: a shaky reading has to hold still for ~85 ms to count.
+    if (conf < 0.60f) { f0CandN_ = 0; return; }   // not periodic (kick, noise): hold
+    const bool clean = conf >= 0.85f;
+    if (std::fabs(hz - f0Held_) < 0.06f * f0Held_) {  // same note (within a semitone)
+        f0CandN_ = 0;
+        if (clean) f0Held_ += (hz - f0Held_) * 0.3f;  // follow its fine pitch
+        else return;
+    } else {
+        if (f0Cand_ > 0.0f && std::fabs(hz - f0Cand_) < 0.03f * f0Cand_) f0CandN_++;
+        else { f0Cand_ = hz; f0CandN_ = 1; }
+        if (f0CandN_ < (clean ? 2 : 8)) return;      // 21 ms clean, 85 ms shaky
+        f0Held_ = hz;                                 // a new note: switch
+        f0CandN_ = 0;
+    }
+    out.f0Hz.store(f0Held_);
+    out.rootHz.store(2.0f * f0Held_);
 }

@@ -19,6 +19,9 @@
 #include "capture_tap.h"
 #include "audio_out.h"
 #ifdef __APPLE__
+#include "audio_in.h"
+#endif
+#ifdef __APPLE__
 #include <CoreAudio/CoreAudio.h>
 #endif
 #include "shaderhost.h"
@@ -43,6 +46,11 @@ static Engine gEngine;
 static SystemTap gTap;
 static OutputUnit gOut;
 static StereoRing gRing;
+#ifdef __APPLE__
+static StereoRing gInRing;   // live input from the interface (guitar, mic…)
+static InputUnit gIn;
+static bool gInOn = true;   // on by default: input 1 (the guitar jack) feeds the engine
+#endif
 static std::vector<OutDevice> gDevices;
 static int gSelDevice = -1;
 static int gActiveTab = 0;
@@ -87,12 +95,13 @@ static void insetConvexPoly(const ImVec2* p, int n, float g, ImVec2* out) {
 }
 
 static const char* kZoneNames[NZONES] = {"HEAD", "HEART", "BELLY", "BUTT", "FEET"};
-static const char* kTabNames[4] = {"Breath", "Energy", "Relax", "Creative"};
-static const int kTabPreset[4] = {1, 3, 0, 4}; // Meditate, Energize, Rest, Peak
+static const char* kTabNames[5] = {"Calm", "Heal", "Breath", "Energy", "Creative"};
+static const int kTabPreset[5] = {7, 8, 1, 3, 4}; // Calm, Heal, Meditate, Energize, Peak
 static const char* kKeyNames[12] = {"C","C#","D","D#","E","F","F#","G","G#","A","A#","B"};
 
 static ImU32 W(float a) { return IM_COL32(255, 255, 255, (int)(a * 255)); }
 
+static void applyPresetTuning(int t);   // defined after the tunings table
 static void applyPreset(int p) {
     const Preset& pr = kPresets[p];
     gEngine.params.intensity.store(pr.intensity);
@@ -111,6 +120,9 @@ static void applyPreset(int p) {
         gZoneSlider[z] = auto5[z];
         gEngine.params.zoneLevel[z].store(auto5[z]);
     }
+    gEngine.params.pacerHz.store(pr.pacerHz);
+    gEngine.params.pacerDepth.store(pr.pacerDepth);
+    applyPresetTuning(pr.tuning);
 }
 
 #ifdef __APPLE__
@@ -169,10 +181,28 @@ static void playToneAsync(const std::string& path) {
 #endif
 }
 
+#ifdef __APPLE__
+// live input follows the engine's device: on = capture that interface's inputs
+static void setInput(bool on) {
+    gInOn = on;
+    gIn.stop();
+    gOut.inRing = nullptr;
+    if (!on || gSelDevice < 0 || gSelDevice >= (int)gDevices.size()) return;
+    gInRing.init(48000);
+    if (gIn.start(gDevices[gSelDevice].id, &gInRing)) {
+        gOut.inRing = &gInRing;
+        fprintf(stderr, "[input] live input on %s: %d inputs, using %d/%d\n",
+                gDevices[gSelDevice].name.c_str(), gIn.deviceChannels, gIn.chanL.load() + 1, gIn.chanR.load() + 1);
+    } else fprintf(stderr, "[input] %s\n", gIn.lastError.c_str());
+}
+#endif
 static void startAudio() {
     if (!gTap.running()) gTap.start(&gRing);
     if (!gOut.running() && gSelDevice >= 0 && gSelDevice < (int)gDevices.size())
         gOut.start(gDevices[gSelDevice].id, &gEngine, &gRing);
+#ifdef __APPLE__
+    if (gInOn) setInput(true);   // follow the device
+#endif
     gPlaying = gOut.running();
 }
 static void stopAudio() {
@@ -304,8 +334,16 @@ static const TuningDef kTunings[] = {
     {"WELL-TUNED", "7-limit, after La Monte Young: 1/1 · 9/8 · 21/16 · 3/2 · 7/4", {70, 60, 52.5f, 45, 40}},
     {"BEAT 3", "neighbours 3 Hz apart: the whole body throbs at 3 Hz", {52, 49, 46, 43, 40}},
     {"UNISON", "every zone on 40 Hz: one coherent field, no beating", {40, 40, 40, 40, 40}},
+    // CALM: just intonation on a 32 Hz root, every ratio consonant, the top
+    // held at a fifth so nothing beats faster than the breath
+    {"CALM", "just stack on 32 Hz: 1/1 · 5/4 · 3/2 · 15/8 · 2/1 — consonant, no fast beating", {64, 60, 48, 40, 32}},
 };
 static const int kNumTunings = sizeof(kTunings) / sizeof(kTunings[0]);
+static void setZoneHz(int z, float hz);
+static void applyPresetTuning(int t) {
+    if (t < 0 || t >= kNumTunings) return;
+    for (int z = 0; z < NZONES; z++) setZoneHz(z, kTunings[t].hz[z]);
+}
 
 static float ccToHz(int v) { return kTuneMin * std::pow(kTuneMax / kTuneMin, v / 127.0f); }
 static void outCC(int ch, int cc, float v01);
@@ -2028,6 +2066,11 @@ int main(int argc, char** argv) {
         ImGui::NewFrame();
 
         processMidi(glfwGetTime(), ImGui::GetIO().DeltaTime);
+#ifdef __APPLE__
+        { static double tIn = 0; double tn = glfwGetTime();
+          if (gIn.running() && tn - tIn > 2.0) { tIn = tn; float pk = gIn.peak.load();
+            if (pk > 0.01f) fprintf(stderr, "[input] peak %.2f\n", pk); } }
+#endif
 
         // TEST ALL sweep: when the current zone's pulse ends, fire the next,
         // so each amp/transducer can be verified by feel in order
@@ -2441,6 +2484,44 @@ int main(int argc, char** argv) {
                         gTestPulse[z] = 0.7f;
                     }
                 }
+#ifdef __APPLE__
+                // ── live input: the interface's own inputs into the engine ──
+                ImGui::Separator();
+                ImGui::TextDisabled("LIVE INPUT   ·   guitar / mic on the interface, felt like the music");
+                {
+                    bool on = gInOn;
+                    if (ImGui::Checkbox("Input on", &on)) setInput(on);
+                    if (gInOn && gIn.running()) {
+                        int nin = std::max(1, gIn.deviceChannels);
+                        int cl = gIn.chanL.load() + 1, cr = gIn.chanR.load() + 1;
+                        ImGui::SameLine(0, 14);
+                        ImGui::SetNextItemWidth(70);
+                        if (ImGui::InputInt("L##inl", &cl, 1, 1)) gIn.chanL.store(std::min(std::max(cl, 1), nin) - 1);
+                        ImGui::SameLine();
+                        ImGui::SetNextItemWidth(70);
+                        if (ImGui::InputInt("R##inr", &cr, 1, 1)) gIn.chanR.store(std::min(std::max(cr, 1), nin) - 1);
+                        ImGui::SameLine();
+                        float g = gIn.gain.load();
+                        ImGui::SetNextItemWidth(110);
+                        if (ImGui::SliderFloat("##ingain", &g, 0.0f, 8.0f, "gain %.1fx")) gIn.gain.store(g);
+                        ImGui::SameLine();
+                        float pk = gIn.peak.load();
+                        ImVec2 mp = ImGui::GetCursorScreenPos();
+                        ImGui::GetWindowDrawList()->AddRectFilled(ImVec2(mp.x, mp.y + 6), ImVec2(mp.x + 80, mp.y + 14), IM_COL32(255, 255, 255, 18), 3);
+                        if (pk > 0.003f)
+                            ImGui::GetWindowDrawList()->AddRectFilled(ImVec2(mp.x, mp.y + 6), ImVec2(mp.x + 80 * std::min(1.0f, pk), mp.y + 14),
+                                                                      pk > 0.98f ? IM_COL32(255, 120, 90, 255) : IM_COL32(140, 235, 255, 230), 3);
+                        ImGui::Dummy(ImVec2(84, 0));
+                        ImGui::TextDisabled("inputs 1-%d on %s  ·  same L and R = mono", nin, gDevices[gSelDevice].name.c_str());
+                        bool hear = gOut.inToSpeakers.load();
+                        if (ImGui::Checkbox("Also play the input on the speaker outputs", &hear)) gOut.inToSpeakers.store(hear);
+                        if (ImGui::IsItemHovered()) ImGui::SetTooltip("off = the input is only FELT (your amp or the other interface makes the sound)");
+                    } else if (gInOn) {
+                        ImGui::SameLine();
+                        ImGui::TextColored(ImVec4(1, 0.75f, 0.3f, 1), "%s", gIn.lastError.c_str());
+                    }
+                }
+#endif
                 {
                     bool mon = gEngine.params.monitorVibOnStereo.load() != 0;
                     if (ImGui::Checkbox("Monitor vibration on stereo devices", &mon))
@@ -2562,8 +2643,8 @@ int main(int argc, char** argv) {
         const float gutter = 24;              // vertical rhythm between blocks
         {
             float tx = cardX + pad, ty = bodyY, tw = cardW - 2 * pad, th = 22;
-            float each = tw / 4.0f;
-            for (int t = 0; t < 4; t++) {
+            float each = tw / 5.0f;
+            for (int t = 0; t < 5; t++) {
                 ImVec2 ts = ImGui::CalcTextSize(kTabNames[t]);
                 ImVec2 c0(tx + t * each, ty);
                 ImGui::SetCursorScreenPos(c0);
@@ -2590,9 +2671,9 @@ int main(int argc, char** argv) {
             int key = gEngine.analyzer.out.keyIndex.load();
             int minor = gEngine.analyzer.out.keyMinor.load();
             char info[96];
-            snprintf(info, sizeof(info), "+ 5 zones   ·   %.0f BPM   ·   %s %s   ·   %.0f Hz",
+            snprintf(info, sizeof(info), "+ 5 zones   ·   %.0f BPM   ·   %s %s   ·   low %.1f Hz  x2 = %.0f Hz",
                      bpm, kKeyNames[key], minor ? "minor" : "major",
-                     gEngine.analyzer.out.midOctaveHz.load());
+                     gEngine.analyzer.out.f0Hz.load(), gEngine.analyzer.out.rootHz.load());
             dl->AddText(ImVec2(mx + 84, my + 12), W(0.32f), info);
             // engine mode: BODY (one root, five mixes) vs SPLIT (five layers of the song)
             {
@@ -2922,7 +3003,8 @@ static int runSelfTest() {
         }
         // capture tempo/key from the rhythmic section before the beatless tail
         float bpm = eng.analyzer.out.bpm.load();
-        float root = eng.analyzer.out.midOctaveHz.load();
+        float root = eng.analyzer.out.f0Hz.load();   // lowest pitch: the 55 Hz pad
+        float rootX2 = eng.analyzer.out.rootHz.load();
 
         // breath/dynamics: quiet ambient tail (-18 dB pad, no beat) must pull
         // vibrations down much harder than the input level drop alone
@@ -3027,9 +3109,9 @@ static int runSelfTest() {
             if (!(vr < 0.40f && openRms > 0.02f)) failures++;
         }
 
-        printf("engine: BPM=%.1f (expect ~120)  root=%.1f Hz (expect 45-70)\n", bpm, root);
+        printf("engine: BPM=%.1f (expect ~120)  lowest pitch=%.1f Hz (expect 55)  x2=%.1f Hz\n", bpm, root, rootX2);
         bool bpmOK = bpm > 100 && bpm < 140;
-        bool rootOK = root >= 45 && root <= 70;
+        bool rootOK = root >= 53 && root <= 57 && std::fabs(rootX2 - 2 * root) < 0.5f;
         if (!bpmOK) { printf("  FAIL bpm\n"); failures++; } else printf("  PASS bpm\n");
         if (!rootOK) { printf("  FAIL root\n"); failures++; } else printf("  PASS root\n");
         static const char* zn[5] = {"HEAD", "HEART", "BELLY", "ROOT", "FEET"};

@@ -59,6 +59,7 @@ if(APPLE)
     ${AVA_ICON}
     src/audio_out.cpp
     src/capture_tap.mm
+    src/audio_in.mm
     src/midi_in.mm
     src/midi_out.mm
     src/mac_fullscreen.mm)

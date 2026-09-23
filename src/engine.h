@@ -34,6 +34,11 @@ struct Params {
     // instruments (strings, piano, pads) come up to be felt, loud passages
     // and transients are left alone. 0 = off, 1 = strong
     std::atomic<float> lift{0.55f};
+    // Breath pacer: a slow, whole-body swell at a breathing rate. 0.1 Hz is
+    // six breaths a minute, the resonant-breathing rate used in HRV /
+    // anxiety work; the body tends to fall in with it. 0 = off.
+    std::atomic<float> pacerHz{0.0f};
+    std::atomic<float> pacerDepth{0.5f};
     std::atomic<float> intensity{0.7f};
     std::atomic<float> grounding{0.5f};
     std::atomic<float> uplift{0.5f};
@@ -159,15 +164,24 @@ struct Preset {
     const char* name;
     float intensity, grounding, uplift, brainwave, bodyFlow, warmth, subDepth;
     float heartLevel, bellyLevel; // <0 = auto
+    float pacerHz, pacerDepth;    // breath pacer (0 = off)
+    int   tuning;                 // index into the tuner's tunings, -1 = leave
 };
 static const Preset kPresets[] = {
-    {"Rest",     0.60f, 0.8f, 0.2f, DELTA, 0.3f, 0.2f, 0.5f, -1, -1},
-    {"Meditate", 0.65f, 0.6f, 0.4f, THETA, 0.5f, 0.3f, 0.4f, -1, -1},
-    {"Focus",    0.70f, 0.4f, 0.6f, ALPHA, 0.4f, 0.4f, 0.3f, -1, -1},
-    {"Energize", 0.80f, 0.3f, 0.7f, BETA,  0.6f, 0.6f, 0.3f, -1, -1},
-    {"Peak",     0.85f, 0.2f, 0.8f, GAMMA, 0.8f, 0.7f, 0.2f, -1, -1},
-    {"Ground",   0.75f, 0.9f, 0.1f, THETA, 0.2f, 0.5f, 0.7f, -1, -1},
-    {"Heart",    0.70f, 0.5f, 0.5f, ALPHA, 0.7f, 0.4f, 0.3f, 0.9f, 0.8f},
+    {"Rest",     0.60f, 0.8f, 0.2f, DELTA, 0.3f, 0.2f, 0.5f, -1, -1, 0.0f,  0.0f, -1},
+    {"Meditate", 0.65f, 0.6f, 0.4f, THETA, 0.5f, 0.3f, 0.4f, -1, -1, 0.0f,  0.0f, -1},
+    {"Focus",    0.70f, 0.4f, 0.6f, ALPHA, 0.4f, 0.4f, 0.3f, -1, -1, 0.0f,  0.0f, -1},
+    {"Energize", 0.80f, 0.3f, 0.7f, BETA,  0.6f, 0.6f, 0.3f, -1, -1, 0.0f,  0.0f, -1},
+    {"Peak",     0.85f, 0.2f, 0.8f, GAMMA, 0.8f, 0.7f, 0.2f, -1, -1, 0.0f,  0.0f, -1},
+    {"Ground",   0.75f, 0.9f, 0.1f, THETA, 0.2f, 0.5f, 0.7f, -1, -1, 0.0f,  0.0f, -1},
+    {"Heart",    0.70f, 0.5f, 0.5f, ALPHA, 0.7f, 0.4f, 0.3f, 0.9f, 0.8f, 0.0f, 0.0f, -1},
+    // CALM — anxiety: low, steady, grounded, no accents; a 0.1 Hz breath
+    // swell (6 breaths/min, the resonant-breathing rate), theta entrainment,
+    // consonant just-intonation stack with the heart slightly forward
+    {"Calm",     0.50f, 0.85f, 0.15f, THETA, 0.15f, 0.25f, 0.55f, 0.75f, 0.6f, 0.10f, 0.55f, 4},
+    // HEAL — classic vibroacoustic protocol: 40 Hz on every zone (the most
+    // studied VAT frequency), gently pulsed at ~0.125 Hz, delta band, slow
+    {"Heal",     0.55f, 0.8f, 0.2f, DELTA, 0.10f, 0.15f, 0.5f, -1, -1, 0.125f, 0.40f, 3},
 };
 static const int kNumPresets = sizeof(kPresets) / sizeof(kPresets[0]);
 
@@ -201,7 +215,7 @@ private:
     // oscillators / lfos
     dsp::Osc oscMid_, oscSub_, oscHigh_, oscFeet_;
     dsp::Osc lfoEnt_, lfoSweep_, lfoHeart_;
-    dsp::Smooth freqSm_;
+    dsp::Smooth freqSm_, feetHzSm_;
 
     // onset pulse envelope
     float onsetEnv_ = 0, onsetTarget_ = 0;
@@ -224,12 +238,14 @@ private:
     float onsetRate_ = 0;     // decaying onset counter (τ 8 s)
     float rhythmSm_ = 0.5f;   // smoothed rhythmic-density factor 0..1
     dsp::Osc lfoSwell_;       // slow tidal swell
+    dsp::Osc lfoPacer_;       // breath pacer
 
     // void (negative space on peak hits)
     float hotSm_ = 0;         // smoothed loudness-vs-ceiling (τ 1.5 s)
     float bassMax_ = 1e-6f;   // slow running max of bass envelope
     float voidEnv_ = 0;       // 0..1 duck envelope (1 = full hole)
     long voidHold_ = 0;       // samples left at full duck
+    long voidArm_ = 0;        // samples until an armed thump is judged (envelopes settled)
     long voidRefrac_ = 0;     // samples until the next void may trigger
 
     // startup warm-up: mute vibrations while AGC/envelopes settle, then fade in
@@ -251,6 +267,13 @@ private:
     dsp::Smooth vocHzSm_, airHzSm_;
     float kickEnv_ = 0, snareEnv_ = 0;     // drum thump envelopes
     float kickPitch_ = 0;                  // pitch-drop state for the thump
+    // low-end transient detector (time domain, sample-accurate): the kick or
+    // bass pluck is a jump of the 35-130 Hz envelope over its recent peak
+    // (150 ms peak-hold, read 30 ms back)
+    dsp::BandPass thumpBand_;
+    dsp::DelayLine thumpDelay_;
+    float thumpFast_ = 0, thumpHold_ = 0, thumpMax_ = 1e-4f;
+    long thumpSince_ = 1 << 30;
     float splitPeak_[NZONES] = {1e-3f, 1e-3f, 1e-3f, 1e-3f, 1e-3f};
     float vocGate_ = 0, airGate_ = 0;      // smoothed "is this layer present"
     float prevBandOnset_[3] = {0, 0, 0};
@@ -268,6 +291,7 @@ private:
 
 public:
     std::atomic<float> breathNow{0}; // UI: current breath gain 0..1
+    std::atomic<long>  thumpCount{0}; // low-end hits detected so far (UI beat flash / tests)
     std::atomic<float> voidNow{0};   // UI: current void duck 0..1
     // audio features for the shader background (web-host uniform contract)
     std::atomic<float> audioLevel{0}, audioBass{0}, audioMid{0}, audioHigh{0};

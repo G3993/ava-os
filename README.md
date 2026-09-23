@@ -9,7 +9,7 @@ AVA OS listens to whatever the computer is playing and turns it into five body-z
 ## What it does
 
 - **System audio in.** macOS: a global process tap (macOS 14.4+). Windows: WASAPI loopback of the default output.
-- **Engine.** Onset, tempo and key analysis drive per-zone carriers (sub, mid, high), breath-following dynamics, brainwave entrainment pulses (delta to gamma), body sweeps and zone accents. `src/engine.cpp`.
+- **Engine.** The bed is tuned to the music's lowest pitch, doubled: a time-domain tracker (YIN on the bass band) measures the fundamental of the lowest note sounding, the rings play 2·f0 octave-folded into 40-80 Hz and the feet carry the fundamental itself. Pulses come from a sample-accurate low-end transient detector (kick / bass pluck), tempo from spectral-flux autocorrelation. On top: breath-following dynamics, brainwave entrainment pulses (delta to gamma), body sweeps and zone accents. `src/engine.cpp`, `src/analysis.cpp`.
 - **Pads.** Click, drag or MIDI-strike any ring. Voices: PURE, WHALE, QUAKE, HEART, PURR, DROP. Press-and-hold swells.
 - **Routing.** Music pair, optional surround pair, one or two output channels per zone, per-zone trim, solo one ring.
 - **HEALTH.** Interface status, per-channel output meters, TEST ALL ZONES sweep, ISOLATE RING solo, PING any jack, transducer thermal guard.
@@ -64,7 +64,7 @@ All run headless against the first interface with 7+ outputs.
 ```
 src/main.cpp        UI (Dear ImGui), octagon, tuner, health, MIDI map, CLI tests
 src/engine.*        vibroacoustic engine, pad synth, FX bus
-src/analysis.*      onset / tempo / key analysis
+src/analysis.*      lowest-pitch (YIN) / onset / tempo / key analysis
 src/audio_mix.cpp   shared output mixer: routing, solo, thermal guard, ping, meters
 src/audio_out.*     macOS CoreAudio output      src/audio_win.cpp  Windows miniaudio output
 src/capture_tap.*   macOS system-audio tap      src/midi_in.mm, midi_out.mm  CoreMIDI

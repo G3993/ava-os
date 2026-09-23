@@ -1,6 +1,14 @@
 #include "engine.h"
 #include <algorithm>
 
+// octave-fold a frequency into (lo, hi]: same note, the octave the zone can move
+static inline float foldHz(float hz, float lo, float hi) {
+    if (hz <= 1.0f) return lo;
+    while (hz > hi) hz *= 0.5f;
+    while (hz <= lo) hz *= 2.0f;
+    return hz;
+}
+
 void Engine::init() {
     analyzer.init(kSR);
 
@@ -18,8 +26,13 @@ void Engine::init() {
     midF_.design(10, 150, kSR);
     highF_.design(10, 150, kSR);
 
-    freqSm_.design(0.5f, kSR);
+    // root glide: short, so a new bass note lands as a note change, not a slide
+    freqSm_.design(0.04f, kSR);
     freqSm_.v = 55.0f;
+    feetHzSm_.design(0.04f, kSR);
+    feetHzSm_.v = 55.0f;
+    thumpBand_.design(35, 130, kSR);
+    thumpDelay_.init(2048);
 
     onsetAtkCoef_ = std::exp(-1.0f / (0.008f * kSR));
 
@@ -42,10 +55,10 @@ void Engine::init() {
     splitBassF_.design(5, 60, kSR, 15.0f);
     splitVocF_.design(6, 90, kSR, 15.0f);
     splitAirF_.design(4, 70, kSR, 15.0f);
-    vocHzSm_.design(0.06f, kSR); vocHzSm_.v = 55.0f;
-    airHzSm_.design(0.05f, kSR); airHzSm_.v = 70.0f;
-    harmHzSm_.design(0.09f, kSR); harmHzSm_.v = 48.0f;
-    lowHzSm_.design(0.08f, kSR); lowHzSm_.v = 50.0f;
+    vocHzSm_.design(0.03f, kSR); vocHzSm_.v = 55.0f;
+    airHzSm_.design(0.03f, kSR); airHzSm_.v = 70.0f;
+    harmHzSm_.design(0.03f, kSR); harmHzSm_.v = 55.0f;
+    lowHzSm_.design(0.03f, kSR); lowHzSm_.v = 27.5f;
     splitLowBand_.design(80, 200, kSR);          // cello, low piano, low synth
     splitLowF_.design(12, 220, kSR, 15.0f);      // slower: these are sustained
     splitHarmF_.design(25, 350, kSR, 15.0f);     // chords/strings bloom, not snap
@@ -157,6 +170,19 @@ void Engine::process(const float* inL, const float* inR, float** out, int n) {
     const float fxTremD = params.fxTrem.load();
     const float fxCoef = std::exp(-1.0f / (0.008f * kSR));
 
+    // low-end transient detector: 2 ms attack / 50 ms release envelope of the
+    // 35-130 Hz band, compared with its own recent peak (150 ms peak-hold,
+    // read 30 ms back). A kick or bass pluck is a >1.7x jump (a kick over a
+    // held bass note only lifts the summed envelope ~2x; the ripple of a bare
+    // 35 Hz tone is ~1.3x). The peak-hold means the kick's tail beating
+    // against the bass cannot re-fire; a held note never fires; 110 ms refractory
+    const float thumpAtk = std::exp(-1.0f / (0.002f * kSR));
+    const float thumpRel = std::exp(-1.0f / (0.050f * kSR));
+    const float thumpHoldRel = std::exp(-1.0f / (0.150f * kSR));
+    const float thumpMaxDecay = 1.0f - 1.0f / (20.0f * kSR);
+    const int   thumpLook = (int)(0.030f * kSR);
+    const long  thumpRefrac = (long)(0.110f * kSR);
+
     for (int i = 0; i < n; i++) {
         float L = inL[i], R = inR[i];
         float mono = 0.5f * (L + R);
@@ -192,8 +218,26 @@ void Engine::process(const float* inL, const float* inR, float** out, int n) {
         breathG_ = bc * (breathG_ - breathRaw) + breathRaw;
 
         // ── analysis ──
+        // spectral-flux onsets feed tempo and rhythmic density; the felt
+        // pulses come from the low-end transient below (sample-accurate)
         float onset = analyzer.pushSample(mono);
-        if (onset > 0) onsetTarget_ = std::min(1.0f, onsetTarget_ + onset);
+        float thump = 0.0f;
+        {
+            float ta = std::fabs(thumpBand_.process(mono));
+            thumpFast_ = (ta > thumpFast_ ? thumpAtk : thumpRel) * (thumpFast_ - ta) + ta;
+            thumpHold_ = std::max(thumpFast_, thumpHold_ * thumpHoldRel);
+            float before = thumpDelay_.tap(thumpLook);
+            thumpDelay_.push(thumpHold_);
+            thumpMax_ = std::max(thumpFast_, thumpMax_ * thumpMaxDecay);
+            thumpSince_++;
+            if (thumpSince_ > thumpRefrac && thumpFast_ > 0.12f * thumpMax_
+                && thumpFast_ > 1.7f * std::max(before, 0.02f * thumpMax_)) {
+                thump = std::min(1.0f, thumpFast_ / thumpMax_);
+                thumpSince_ = 0;
+                thumpCount.fetch_add(1, std::memory_order_relaxed);
+            }
+        }
+        if (thump > 0) onsetTarget_ = std::min(1.0f, onsetTarget_ + thump);
 
         // ── song character: rhythmic density → adaptive intensity + swell ──
         if (onset > 0) onsetRate_ += 1.0f;
@@ -206,6 +250,15 @@ void Engine::process(const float* inL, const float* inR, float** out, int n) {
         // slow tidal swell (~14 s period): deep for ambient, subtle for beats
         float swellDepth = dynAmt * (0.06f + 0.24f * (1.0f - rhythmSm_));
         float swell = 1.0f - swellDepth * (0.5f + 0.5f * lfoSwell_.tick(0.07f, kSR));
+        // breath pacer: raised-sine swell at a breathing rate on top
+        {
+            float ph = params.pacerHz.load();
+            if (ph > 0.001f) {
+                float d = std::min(0.9f, std::max(0.0f, params.pacerDepth.load()));
+                float b = 0.5f + 0.5f * lfoPacer_.tick(ph, kSR);   // 0 = out-breath, 1 = in-breath
+                swell *= (1.0f - d) + d * (0.35f + 0.65f * b);
+            }
+        }
 
         // onset pulse env: fast attack toward target, tempo-scaled decay
         onsetTarget_ *= onsetDecayCoef;
@@ -237,7 +290,11 @@ void Engine::process(const float* inL, const float* inR, float** out, int n) {
             bassMax_ = std::max(bassNow, bassMax_ * bassMaxDecay);
             if (voidRefrac_ > 0) voidRefrac_--;
             if (voidHold_ > 0) voidHold_--;
-            if (voidAmt > 0.01f && onset > 0 && voidRefrac_ == 0
+            // the thump fires within ~2 ms of the hit, before the 10 ms bass
+            // follower has seen it: arm, and judge the hit 12 ms later
+            if (voidAmt > 0.01f && thump > 0 && voidRefrac_ == 0 && voidArm_ == 0)
+                voidArm_ = (long)(0.012f * kSR);
+            if (voidArm_ > 0 && --voidArm_ == 0
                 && hotSm_ > hotTh && bassNow > bassTh * bassMax_) {
                 voidHold_ = voidHoldLen;
                 voidRefrac_ = voidRefracLen;
@@ -247,11 +304,17 @@ void Engine::process(const float* inL, const float* inR, float** out, int n) {
             voidEnv_ = vc * (voidEnv_ - vt) + vt;
         }
 
-        // root frequency, smoothed
-        float freq = freqSm_.tick(analyzer.out.midOctaveHz.load());
+        // ── root: the lowest pitch of the music, doubled ──
+        // f0 is the measured fundamental of the bass (analysis.cpp). The bed
+        // is tuned to 2·f0; the rings (10-80 Hz) take it octave-folded into
+        // 40-80 Hz so it is always the same note in the octave they can move,
+        // and the feet (ButtKicker, 5-200 Hz) carry the fundamental itself.
+        const float f0 = analyzer.out.f0Hz.load();
+        const float rootRaw = 2.0f * f0;
+        float freq = freqSm_.tick(foldHz(rootRaw, 40.0f, 80.0f));
         float subFreq = freq * 0.5f;
         float highFreq = freq * 1.5f;
-        float feetFreq = subFreq * 0.5f >= 20.0f ? subFreq * 0.5f : subFreq;
+        float feetFreq = feetHzSm_.tick(foldHz(f0, 20.0f, 80.0f));
 
         // oscillators
         float carrier = oscMid_.tick(freq, kSR);
@@ -331,31 +394,23 @@ void Engine::process(const float* inL, const float* inR, float** out, int n) {
             float bassE = splitBassF_.process(bassSig);
             // drums: the kick band's transient, and the snare band's, each
             // shaped into a thump with a pitch drop so hits read as hits
-            float kickOn = analyzer.out.bandOnset[0].load();
             float snareOn = analyzer.out.bandOnset[1].load();
-            if (kickOn > 0.55f && kickOn > prevBandOnset_[0] + 0.15f) { kickEnv_ = std::max(kickEnv_, kickOn); kickPitch_ = 1.0f; }
+            if (thump > 0) { kickEnv_ = std::max(kickEnv_, thump); kickPitch_ = 1.0f; }
             if (snareOn > 0.6f && snareOn > prevBandOnset_[1] + 0.2f) snareEnv_ = std::max(snareEnv_, snareOn * 0.8f);
-            prevBandOnset_[0] = kickOn; prevBandOnset_[1] = snareOn;
+            prevBandOnset_[1] = snareOn;
             kickEnv_ *= 1.0f - 1.0f / (0.09f * kSR);
             snareEnv_ *= 1.0f - 1.0f / (0.05f * kSR);
             kickPitch_ *= 1.0f - 1.0f / (0.04f * kSR);
             // kick thump: 42 Hz with a drop from 72 Hz, all inside the ring band
             float kick = oscKick_.tick(42.0f * (1.0f + 0.7f * kickPitch_), kSR) * kickEnv_;
             float snare = oscSnare_.tick(72.0f, kSR) * snareEnv_;
-            // vocal / chord layer: its own partial, folded into 45..90 Hz
-            float vocHzRaw = analyzer.out.bandPeakHz[1].load();
-            float airHzRaw = analyzer.out.bandPeakHz[2].load();
-            auto fold = [](float hz, float lo, float hi) {
-                if (hz <= 1.0f) return lo;
-                while (hz > hi) hz *= 0.5f;
-                while (hz < lo) hz *= 2.0f;
-                return hz;
-            };
-            // ── HEAD = the voice. Strongest partial of the vocal band (160-900),
-            // folded into the head's sweet band; its weight follows the vocal
-            // band's envelope, boosted by the 0.9-6 kHz presence that a voice
-            // has and a piano chord mostly doesn't ──
-            float vocHz = vocHzSm_.tick(fold(vocHzRaw, 45.0f, 80.0f));
+            // every tonal layer plays the root (lowest pitch x2, folded to the
+            // ring octave): one true note across the body, each zone with its
+            // own envelope. No per-band partial picking.
+            // ── HEAD = the voice. Its weight follows the vocal band's envelope,
+            // boosted by the 0.9-6 kHz presence that a voice has and a piano
+            // chord mostly doesn't ──
+            float vocHz = vocHzSm_.tick(freq);
             float vocE = lifted(splitVocF_.process(splitVocBand_.process(mono)));
             float airE = lifted(splitAirF_.process(splitAirBand_.process(mono)));
             float vocPres = analyzer.out.bandPeakMag[1].load();
@@ -366,8 +421,7 @@ void Engine::process(const float* inL, const float* inR, float** out, int n) {
             // ── HEART = the harmony. Second partial of the same band (a different
             // note from the voice: the chord, strings, piano under it), slow
             // bloom so sustained instruments swell rather than tick ──
-            float harmHzRaw = analyzer.out.bandPeak2Hz[1].load();
-            float harmHz = harmHzSm_.tick(fold(harmHzRaw, 35.0f, 70.0f));
+            float harmHz = harmHzSm_.tick(freq);
             float harmE = lifted(splitHarmF_.process(splitVocBand_.process(mono)));
             float harmPres = analyzer.out.bandPeak2Mag[1].load();
             harmGate_ += ((harmPres > 0.14f ? 1.0f : 0.0f) - harmGate_) * (1.0f / (0.15f * kSR));
@@ -376,8 +430,7 @@ void Engine::process(const float* inL, const float* inR, float** out, int n) {
             // ── ROOT also carries the low instruments (80-200 Hz: cello, low
             // piano, low synth) that the rings cannot reproduce directly:
             // folded down, lifted, so a quiet low line is still felt ──
-            float lowHzRaw = analyzer.out.bandPeakHz[0].load();
-            float lowHz = lowHzSm_.tick(fold(lowHzRaw, 30.0f, 65.0f));
+            float lowHz = lowHzSm_.tick(freq * 0.5f); // an octave under the rings' root
             float lowE = lifted(splitLowF_.process(splitLowBand_.process(mono)));
             float lowPres = analyzer.out.bandPeakMag[0].load();
             lowGate_ += ((lowPres > 0.15f ? 1.0f : 0.0f) - lowGate_) * (1.0f / (0.12f * kSR));
@@ -394,6 +447,7 @@ void Engine::process(const float* inL, const float* inR, float** out, int n) {
             if ((i & 1023) == 0) {
                 zoneHz[HEART].store(harmHz);
                 zoneHz[HEAD].store(vocHz);
+                zoneHz[ROOT].store(lowHz);
             }
         }
 
@@ -494,7 +548,7 @@ void Engine::process(const float* inL, const float* inR, float** out, int n) {
                 zoneHz[HEART].store(freq);
             }
             zoneHz[BELLY].store(freq);
-            zoneHz[ROOT].store(subFreq);
+            if (!splitMode) zoneHz[ROOT].store(subFreq);
             zoneHz[FEET].store(feetFreq);
         }
     }
