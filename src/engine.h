@@ -26,10 +26,29 @@ static const float kBrainwaveHz[5] = {2.0f, 6.0f, 10.0f, 20.0f, 40.0f};
 static const char* kBrainwaveName[5] = {"delta", "theta", "alpha", "beta", "gamma"};
 
 struct Params {
-    // 0 = BODY: the original five-module synth, every zone a mix of one root
+    // Engine modes (channel filtering):
+    // 0 = SYNTH: the original five-module synth, every zone a mix of one root
     // 1 = SPLIT: each zone follows its own layer of the song (sub, bass line,
     //     drums, vocal/chord melody, lead/air melody), own pitch, own rhythm
-    std::atomic<int>   engineMode{1};
+    // 2 = MONO: the song itself, felt. The music's low end (18-160 Hz) to
+    //     every zone, bass (18-80) exaggerated x2, plus an octave-down copy
+    //     of the 80-160 Hz bass the rings cannot move. No synthesis, no LFOs.
+    // 3 = STEREO: MONO split left / right. Each ring's L send gets the left
+    //     low end, its R send the right (low-end width x2 so pans are felt);
+    //     the feet stay mono. Needs L/R amp channels per ring (send 1 = L,
+    //     send 2 = R).
+    // 4 = BODY: a 3-channel system, like L/C/R + LFE: HEAD+HEART = the
+    //     voice ("centre"), BELLY+ROOT = bass line + drums (the "mains"),
+    //     FEET = LFE (sub, +10 dB, bass-managed). On a clear bass drop a
+    //     head-to-toe roll fires — the only effect, only then.
+    std::atomic<int>   engineMode{2};
+    // SYNC look-ahead. The analysis hears the music the moment it arrives;
+    // the vibration synth — and the speakers — hear it this much later. Every
+    // detector has some latency (a thump ~8 ms, an FFT onset ~25 ms, a new
+    // bass note ~60 ms); with the music held back by more than that, each
+    // event is placed back at the sample where it really happened, so felt
+    // and heard land together. 0 = off (old behaviour, felt trails heard).
+    std::atomic<float> syncLookaheadMs{80.0f};
     // Lift: gentle upward expansion of the SPLIT layers — quiet sustained
     // instruments (strings, piano, pads) come up to be felt, loud passages
     // and transients are left alone. 0 = off, 1 = strong
@@ -195,6 +214,17 @@ public:
     // stereo in (planar) → 5 vibration channels (planar out[5]), n frames.
     // Stereo passthrough is done by the output stage; this fills vibration only.
     void process(const float* inL, const float* inR, float** out, int n);
+    // the music the speakers should get: the input held back by the same
+    // look-ahead the synth runs on, so it lines up with the vibration. Call
+    // after process() on the same block (may be in place).
+    void delayMusic(const float* L, const float* R, float* oL, float* oR, int n);
+    int lookaheadSamples() const { return look_; }
+    // STEREO mode: the right-side signal per zone for the current block
+    // (out[] is the left side). Valid after process(); null when not stereo.
+    static constexpr int kMaxBlock = 4096;
+    bool stereoBed() const { return stereoOut_; }
+    const float* rightOut(int z) const { return stereoOut_ ? vibR_[z] : nullptr; }
+    std::atomic<float> dropFlash{0};   // UI: bass-drop effect fired (decays)
 
     Params params;
     StreamAnalyzer analyzer;
@@ -283,6 +313,39 @@ private:
     dsp::BandPass splitLowBand_;
     dsp::EnvFollower splitLowF_, splitHarmF_;
     float harmGate_ = 0, lowGate_ = 0;
+
+    // look-ahead: the synth's mono input delayed by look_ samples, the music
+    // delay for the speakers, and events detected by the analysis side that
+    // wait for the synth clock to reach their (back-dated) onset
+    static constexpr int kLookMax = 14400;   // 300 ms
+    static constexpr int kEvQ = 64;
+    dsp::DelayLine lookM_, lookL_, lookR_;
+    int look_ = 0;
+    long anaPos_ = 0;                        // analysis sample clock
+    struct Ev { long at; float v; int kind; }; // kind 0 = thump, 1 = snare
+    Ev evQ_[kEvQ]; int evHead_ = 0, evTail_ = 0;
+    float f0Hist_[512];                      // f0 as published, every 64 samples
+    float prevSnareOn_ = 0;
+
+    // MONO / STEREO / BODY modes
+    dsp::DelayLine synL_, synR_;             // synth-side stereo, delayed like mono
+    dsp::BandPass lowBandM_, lowBandL_, lowBandR_;   // 18-160 Hz music low end
+    dsp::BandPass subHarmBand_;              // 80-160 Hz: bass the rings cannot move
+    dsp::EnvFollower subHarmF_;
+    dsp::Osc oscSubh_;
+    dsp::Smooth subhHzSm_;
+    dsp::ButterLP zoneLPR_[NZONES];          // right-side zone conditioning
+    dsp::Biquad zoneHPR_[NZONES];
+    float vibR_[NZONES][kMaxBlock];
+    bool stereoOut_ = false;
+    // bass-drop detector: a lull in the sub, then a hit that brings it back
+    float subQuietS_ = 0;                    // seconds the sub has been quiet
+    float subAbsMax_ = 1e-4f;                // 60 s peak of the raw sub envelope
+    float subQuietLvl_ = 0;                  // raw sub level during the lull
+    long dropRefrac_ = 0;
+    long dropArm_ = 0;                       // samples until an armed hit is judged
+    float dropT_ = -1;                       // seconds since the drop effect fired (<0 idle)
+    float dropPh_[NZONES] = {0};
 
     // punch-in FX state
     float fxG_ = 1.0f;       // smoothed strobe/choke gate

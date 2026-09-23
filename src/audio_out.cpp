@@ -99,6 +99,8 @@ static OSStatus renderCB(void* inRefCon, AudioUnitRenderActionFlags*,
         }
     }
     eng->process(L.data(), R.data(), vibPtr, n);
+    // speakers get the music held back by the sync look-ahead, in step with the felt output
+    eng->delayMusic(mL.data(), mR.data(), mL.data(), mR.data(), n);
 
     AudioBuffer& b = ioData->mBuffers[0];
     mixOutputBlock(self, eng, mL.data(), mR.data(), vibPtr, (float*)b.mData, n,

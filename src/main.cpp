@@ -2420,6 +2420,17 @@ int main(int argc, char** argv) {
                 pairRow("Music / Hi-Fi", "m", gEngine.params.musicChanL);
                 ImGui::Text("Level"); ImGui::SameLine(150);
                 gainSlider("##mg", gEngine.params.musicGain, 1.5f, "%.2f");
+                // sync look-ahead: the speakers are held back this much so every
+                // detected hit and note can be placed at its true onset
+                ImGui::Text("Sync"); ImGui::SameLine(150);
+                {
+                    float la = gEngine.params.syncLookaheadMs.load();
+                    ImGui::SetNextItemWidth(150);
+                    if (ImGui::SliderFloat("##la", &la, 0.0f, 200.0f, "%.0f ms look-ahead"))
+                        gEngine.params.syncLookaheadMs.store(la);
+                    if (ImGui::IsItemHovered())
+                        ImGui::SetTooltip("Music is held back this much so felt and heard land together.\n0 = off (felt trails heard by 15-40 ms). 80 ms covers every detector.\nVideo lip-sync drifts above ~100 ms.");
+                }
 
                 ImGui::Separator();
                 ImGui::TextDisabled("SURROUND   ·   rear / side pair");
@@ -2451,14 +2462,15 @@ int main(int argc, char** argv) {
                         c = std::min(c + 1, nch - 1);
                         gEngine.params.zoneChan[z].store(c);
                     }
-                    // second send (same signal to another amp channel), Off = none
+                    // second send (same signal to another amp channel; in STEREO
+                    // mode the right side of the ring), Off = none
                     {
                         int c2 = gEngine.params.zoneChan2[z].load();
                         char id2m[16], id2p[16];
                         snprintf(id2m, sizeof(id2m), "-##z2%d", z);
                         snprintf(id2p, sizeof(id2p), "+##z2%d", z);
                         ImGui::SameLine();
-                        ImGui::TextDisabled("+");
+                        ImGui::TextDisabled(gEngine.params.engineMode.load() == 3 ? "R" : "+");
                         ImGui::SameLine();
                         if (ImGui::SmallButton(id2m))
                             gEngine.params.zoneChan2[z].store(c2 <= -1 ? -1 : c2 - 1);
@@ -2671,28 +2683,32 @@ int main(int argc, char** argv) {
             int key = gEngine.analyzer.out.keyIndex.load();
             int minor = gEngine.analyzer.out.keyMinor.load();
             char info[96];
-            snprintf(info, sizeof(info), "+ 5 zones   ·   %.0f BPM   ·   %s %s   ·   low %.1f Hz  x2 = %.0f Hz",
-                     bpm, kKeyNames[key], minor ? "minor" : "major",
-                     gEngine.analyzer.out.f0Hz.load(), gEngine.analyzer.out.rootHz.load());
+            snprintf(info, sizeof(info), "%.0f BPM  ·  %s%s  ·  %.0f Hz",
+                     bpm, kKeyNames[key], minor ? "m" : "",
+                     gEngine.analyzer.out.f0Hz.load());
             dl->AddText(ImVec2(mx + 84, my + 12), W(0.32f), info);
             // engine mode: BODY (one root, five mixes) vs SPLIT (five layers of the song)
             {
-                static const char* modes[2] = {"BODY", "SPLIT"};
+                static const char* modes[5] = {"SYNTH", "SPLIT", "MONO", "STEREO", "BODY"};
+                static const char* modeTips[5] = {
+                    "SYNTH: one root note, five mixes of it. The original engine.",
+                    "SPLIT: feet = sub, root = bass line, belly = drums,\nheart = vocal/chord melody, head = lead/air melody. Five layers at once.",
+                    "MONO: the song itself, felt. Its low end to every zone,\nbass exaggerated x2, plus an octave-down copy of bass the rings can't move.",
+                    "STEREO: MONO split left / right. Send 1 = left side, send 2 = right side\nof each ring (low-end width x2); the feet stay mono.",
+                    "BODY: 3 channels. Head+heart = the voice, belly+root = bass line + drums,\nfeet = LFE sub (+10 dB). A head-to-toe roll fires only on a clear bass drop."};
                 int em = gEngine.params.engineMode.load();
                 float x = mx + mw - 16;
-                for (int m = 1; m >= 0; m--) {
+                for (int m = 4; m >= 0; m--) {
                     ImVec2 ts = ImGui::CalcTextSize(modes[m]);
                     x -= ts.x;
                     ImGui::SetCursorScreenPos(ImVec2(x - 6, my + 8));
                     char id[16]; snprintf(id, sizeof(id), "##em%d", m);
                     if (ImGui::InvisibleButton(id, ImVec2(ts.x + 12, 22))) gEngine.params.engineMode.store(m);
                     bool on = em == m;
-                    if (ImGui::IsItemHovered())
-                        ImGui::SetTooltip(m == 1 ? "SPLIT: feet = sub, root = bass line, belly = drums,\nheart = vocal/chord melody, head = lead/air melody. Five layers at once."
-                                                 : "BODY: one root note, five mixes of it. The original engine.");
+                    if (ImGui::IsItemHovered()) ImGui::SetTooltip("%s", modeTips[m]);
                     dl->AddText(ImVec2(x, my + 12), W(on ? 0.92f : (ImGui::IsItemHovered() ? 0.6f : 0.3f)), modes[m]);
                     if (on) dl->AddLine(ImVec2(x, my + 30), ImVec2(x + ts.x, my + 30), W(0.9f), 1.5f);
-                    x -= 18;
+                    x -= 14;
                 }
             }
 
@@ -2971,6 +2987,7 @@ static int runSelfTest() {
     {
         Engine eng;
         eng.init();
+        eng.params.syncLookaheadMs.store(0); // windows below are relative to the input
         const int block = 512, sr = 48000;
         std::vector<float> L(block), R(block);
         std::vector<float> vibBuf[NZONES];
@@ -3072,6 +3089,7 @@ static int runSelfTest() {
             Engine ev;
             ev.init();
             ev.params.voidAmt.store(1.0f);
+            ev.params.syncLookaheadMs.store(0);
             float kp = 0;
             double duckAcc = 0, openAcc = 0;
             long duckN = 0, openN = 0;
@@ -3492,7 +3510,8 @@ static int runSplitTest(const char* wavPath) {
         printf("track: synthetic 24 s (bass line · kick · vocal melody · lead)\n");
     }
     static const char* zn[NZONES] = {"HEAD", "HEART", "BELLY", "ROOT", "FEET"};
-    for (int mode = 0; mode < 2; mode++) {
+    static const char* modeName[5] = {"SYNTH", "SPLIT", "MONO", "STEREO", "BODY"};
+    for (int mode = 0; mode < 5; mode++) {
         Engine eng; eng.init();
         eng.params.engineMode.store(mode);
         const int blk = 512;
@@ -3504,7 +3523,7 @@ static int runSplitTest(const char* wavPath) {
             eng.process(&L[pos], &R[pos], vib, blk);
             if (pos >= skip) for (int z = 0; z < NZONES; z++) outZ[z].insert(outZ[z].end(), zbuf[z].begin(), zbuf[z].end());
         }
-        printf("── %s ──\n", mode ? "SPLIT" : "BODY");
+        printf("── %s ──\n", modeName[mode]);
         long N = (long)outZ[0].size();
         float rms[NZONES], domHz[NZONES];
         for (int z = 0; z < NZONES; z++) {

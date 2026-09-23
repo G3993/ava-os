@@ -136,6 +136,7 @@ static void outDataCB(ma_device* dev, void* output, const void*, ma_uint32 frame
     }
     self->ring()->pop(L.data(), R.data(), n);
     eng->process(L.data(), R.data(), vibPtr, n);
+    eng->delayMusic(L.data(), R.data(), L.data(), R.data(), n);
 
     mixOutputBlock(self, eng, L.data(), R.data(), vibPtr, (float*)output, n,
                    (int)dev->playback.channels);

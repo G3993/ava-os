@@ -22,6 +22,8 @@ void mixOutputBlock(OutputUnit* self, Engine* eng, const float* L, const float* 
     float surrW = eng->params.surrWidth.load();
     int zc[NZONES], zc2[NZONES];
     float zt[NZONES];
+    const float* vR[NZONES];
+    for (int z = 0; z < NZONES; z++) vR[z] = eng->rightOut(z);
     int solo = eng->params.soloZone.load();
     for (int z = 0; z < NZONES; z++) {
         zc[z] = eng->params.zoneChan[z].load();
@@ -68,7 +70,8 @@ void mixOutputBlock(OutputUnit* self, Engine* eng, const float* L, const float* 
         }
         for (int z = 0; z < NZONES; z++) {
             if (zc[z] >= 0 && zc[z] < ch) f[zc[z]] += vol * zt[z] * vib[z][i];
-            if (zc2[z] >= 0 && zc2[z] < ch) f[zc2[z]] += vol * zt[z] * vib[z][i];
+            // second send: the same signal, or in STEREO mode the right side
+            if (zc2[z] >= 0 && zc2[z] < ch) f[zc2[z]] += vol * zt[z] * (vR[z] ? vR[z][i] : vib[z][i]);
         }
     }
     // thermal guard on zone channels: integrate output power over ~45 s and,

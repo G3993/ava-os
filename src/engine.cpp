@@ -33,6 +33,18 @@ void Engine::init() {
     feetHzSm_.v = 55.0f;
     thumpBand_.design(35, 130, kSR);
     thumpDelay_.init(2048);
+    lookM_.init(16384); lookL_.init(16384); lookR_.init(16384);
+    synL_.init(16384); synR_.init(16384);
+    lowBandM_.design(18, 160, kSR); lowBandL_.design(18, 160, kSR); lowBandR_.design(18, 160, kSR);
+    subHarmBand_.design(80, 160, kSR);
+    subHarmF_.design(5, 80, kSR, 15.0f);
+    subhHzSm_.design(0.03f, kSR); subhHzSm_.v = 41.0f;
+    for (int z = 0; z < NZONES; z++) {
+        zoneLPR_[z].design(zoneHzMax(z), kSR, 6);
+        zoneHPR_[z].highpass(zoneHzMin(z), kSR);
+    }
+    look_ = 0; anaPos_ = 0; evHead_ = evTail_ = 0;
+    for (float& f : f0Hist_) f = 55.0f;
 
     onsetAtkCoef_ = std::exp(-1.0f / (0.008f * kSR));
 
@@ -162,13 +174,39 @@ void Engine::process(const float* inL, const float* inR, float** out, int n) {
     // one smoothed gain (~8 ms) so edges thump instead of clicking
     const int fxStrobeOn = params.fxStrobe.load();
     const int fxChokeOn = params.fxChoke.load();
-    const bool splitMode = params.engineMode.load() == 1;
+    const int  mode = params.engineMode.load();
+    const bool synthMode  = mode == 0;
+    const bool splitMode  = mode == 1 || mode == 4;   // BODY builds on the SPLIT layers
+    const bool stereoMode = mode == 3 && n <= kMaxBlock;
+    stereoOut_ = stereoMode;
+    // bass drop: sub quiet (< 0.25 of its max) for 1.5 s, then a hit that
+    // brings it above 0.75 — the drop. At most one effect every 8 s.
+    const long dropRefracLen = (long)(8.0f * kSR);
     // Lift: e^(1-0.6·lift) — a soft upward expander on normalized envelopes.
     // Transient layers (kick, snare) never pass through it, so punch stays.
     const float liftExp = 1.0f - 0.6f * std::min(1.0f, std::max(0.0f, params.lift.load()));
     auto lifted = [liftExp](float e) { return e > 1e-4f ? std::pow(e, liftExp) : 0.0f; };
     const float fxTremD = params.fxTrem.load();
     const float fxCoef = std::exp(-1.0f / (0.008f * kSR));
+
+    // look-ahead for this block; detector latencies to back-date events by
+    look_ = std::min(kLookMax, std::max(0, (int)(params.syncLookaheadMs.load() * 0.001f * kSR)));
+    const int look = look_;
+    const long dThump = (long)(0.016f * kSR);   // band filter + attack, plus the
+                                                 // 42 Hz thump's own rise through the 80 Hz lowpass
+    const long dSnare = (long)(0.025f * kSR);   // FFT window centre + hop
+    const long dPitch = (long)(0.060f * kSR);   // YIN window centre + persistence
+    // pass-through low bands (sub / bass / low instruments) reach the body
+    // through 4th-order bandpasses and the 6th-order zone lowpass: ~26 ms of
+    // group delay at 20-60 Hz. With look-ahead they read the input that much
+    // earlier, so the felt bass lands with the heard bass.
+    const int leadLow = std::min(look, (int)(0.026f * kSR));
+    // MONO/STEREO paths are shorter filters: 18 ms for the rings (their 80 Hz
+    // zone lowpass adds ~9 ms over the feet's 200 Hz one), 9 ms for the feet
+    const int leadRing = std::min(look, (int)(0.018f * kSR));
+    const int leadFeet = std::min(look, (int)(0.009f * kSR));
+    // the envelope followers behind the BODY carriers have a 10 ms attack
+    const int leadEnv = std::min(look, (int)(0.010f * kSR));
 
     // low-end transient detector: 2 ms attack / 50 ms release envelope of the
     // 35-130 Hz band, compared with its own recent peak (150 ms peak-hold,
@@ -185,7 +223,19 @@ void Engine::process(const float* inL, const float* inR, float** out, int n) {
 
     for (int i = 0; i < n; i++) {
         float L = inL[i], R = inR[i];
-        float mono = 0.5f * (L + R);
+        // ── look-ahead: the analysis hears now; the synth hears `look` later ──
+        float monoA = 0.5f * (L + R);
+        lookM_.push(monoA);
+        float mono = look > 0 ? lookM_.tap(look) : monoA;
+        const float monoLow = look > 0 ? lookM_.tap(look - leadLow) : monoA;
+        const float monoRing = look > 0 ? lookM_.tap(look - leadRing) : monoA;
+        const float monoFeet = look > 0 ? lookM_.tap(look - leadFeet) : monoA;
+        synL_.push(L); synR_.push(R);
+        const float lowL = look > 0 ? synL_.tap(look - leadRing) : L;
+        const float lowR = look > 0 ? synR_.tap(look - leadRing) : R;
+        const float monoEnv = look > 0 ? lookM_.tap(look - leadEnv) : monoA;
+        anaPos_++;
+        const long synthPos = anaPos_ - look;
 
         // scope for UI
         bool doScope = false;
@@ -217,13 +267,20 @@ void Engine::process(const float* inL, const float* inR, float** out, int n) {
         else bc = downSlowCoef;                                      // gentle fade
         breathG_ = bc * (breathG_ - breathRaw) + breathRaw;
 
-        // ── analysis ──
+        // ── analysis (on the undelayed signal) ──
         // spectral-flux onsets feed tempo and rhythmic density; the felt
-        // pulses come from the low-end transient below (sample-accurate)
-        float onset = analyzer.pushSample(mono);
-        float thump = 0.0f;
+        // pulses come from the low-end transient below (sample-accurate).
+        // Each detected event is queued at its back-dated onset in the
+        // synth's clock; with look-ahead the synth reaches it exactly then.
+        float onset = analyzer.pushSample(monoA);
+        auto queueEv = [this](long at, float v, int kind) {
+            int next = (evTail_ + 1) % kEvQ;
+            if (next == evHead_) return;             // queue full: drop
+            evQ_[evTail_] = {at, v, kind};
+            evTail_ = next;
+        };
         {
-            float ta = std::fabs(thumpBand_.process(mono));
+            float ta = std::fabs(thumpBand_.process(monoA));
             thumpFast_ = (ta > thumpFast_ ? thumpAtk : thumpRel) * (thumpFast_ - ta) + ta;
             thumpHold_ = std::max(thumpFast_, thumpHold_ * thumpHoldRel);
             float before = thumpDelay_.tap(thumpLook);
@@ -232,10 +289,25 @@ void Engine::process(const float* inL, const float* inR, float** out, int n) {
             thumpSince_++;
             if (thumpSince_ > thumpRefrac && thumpFast_ > 0.12f * thumpMax_
                 && thumpFast_ > 1.7f * std::max(before, 0.02f * thumpMax_)) {
-                thump = std::min(1.0f, thumpFast_ / thumpMax_);
+                queueEv(anaPos_ - dThump, std::min(1.0f, thumpFast_ / thumpMax_), 0);
                 thumpSince_ = 0;
                 thumpCount.fetch_add(1, std::memory_order_relaxed);
             }
+            // snare band (160-900 Hz) flux, from the FFT: back-dated further
+            float snareOn = analyzer.out.bandOnset[1].load();
+            if (snareOn > 0.6f && snareOn > prevSnareOn_ + 0.2f) queueEv(anaPos_ - dSnare, snareOn * 0.8f, 1);
+            prevSnareOn_ = snareOn;
+            // the bass note as published, every 64 samples, so the synth can
+            // read the note that belongs to the sample it is rendering
+            if ((anaPos_ & 63) == 0) f0Hist_[(anaPos_ >> 6) & 511] = analyzer.out.f0Hz.load();
+        }
+        // ── synth side: events whose onset the synth clock has reached ──
+        float thump = 0.0f;
+        while (evHead_ != evTail_ && evQ_[evHead_].at <= synthPos) {
+            const Ev& e = evQ_[evHead_];
+            if (e.kind == 0) thump = std::max(thump, e.v);
+            else snareEnv_ = std::max(snareEnv_, e.v);
+            evHead_ = (evHead_ + 1) % kEvQ;
         }
         if (thump > 0) onsetTarget_ = std::min(1.0f, onsetTarget_ + thump);
 
@@ -265,12 +337,12 @@ void Engine::process(const float* inL, const float* inR, float** out, int n) {
         onsetEnv_ = onsetAtkCoef_ * (onsetEnv_ - onsetTarget_) + onsetTarget_;
 
         // envelopes (normalized by running max, mirroring offline normalize)
-        float rmsEnv    = rmsF_.process(rmsPre_.process(mono));
-        float subEnv    = subF_.process(subBand_.process(mono));
-        float bassEnv   = bassF_.process(bassBand_.process(mono));
-        float lowMidEnv = lowMidF_.process(lowMidBand_.process(mono));
-        float midEnv    = midF_.process(midBand_.process(mono));
-        float highEnv   = highF_.process(highBand_.process(mono));
+        float rmsEnv    = rmsF_.process(rmsPre_.process(monoEnv));
+        float subEnv    = subF_.process(subBand_.process(monoEnv));
+        float bassEnv   = bassF_.process(bassBand_.process(monoEnv));
+        float lowMidEnv = lowMidF_.process(lowMidBand_.process(monoEnv));
+        float midEnv    = midF_.process(midBand_.process(monoEnv));
+        float highEnv   = highF_.process(highBand_.process(monoEnv));
         if (i == n - 1) {
             audioLevel.store(rmsEnv);
             audioBass.store(std::max(subEnv, bassEnv));
@@ -309,7 +381,15 @@ void Engine::process(const float* inL, const float* inR, float** out, int n) {
         // is tuned to 2·f0; the rings (10-80 Hz) take it octave-folded into
         // 40-80 Hz so it is always the same note in the octave they can move,
         // and the feet (ButtKicker, 5-200 Hz) carry the fundamental itself.
-        const float f0 = analyzer.out.f0Hz.load();
+        float f0;
+        if (look >= dPitch) {
+            // the note the analyser had published `dPitch` after this sample:
+            // i.e. the note that actually starts here
+            long pubAt = synthPos + dPitch;
+            f0 = f0Hist_[(pubAt >> 6) & 511];
+        } else {
+            f0 = analyzer.out.f0Hz.load();
+        }
         const float rootRaw = 2.0f * f0;
         float freq = freqSm_.tick(foldHz(rootRaw, 40.0f, 80.0f));
         float subFreq = freq * 0.5f;
@@ -386,18 +466,16 @@ void Engine::process(const float* inL, const float* inR, float** out, int n) {
 
         // ── SPLIT: five layers of the song, one per zone ──
         float split[NZONES] = {0, 0, 0, 0, 0};
+        // real bass, felt directly (8-50 sub, 40-80 bass line): one filter
+        // step per sample, shared by SPLIT, BODY, MONO and STEREO
+        const float subSig = splitSub_.process(monoLow);
+        const float bassSig = splitBass_.process(monoLow);
         if (splitMode) {
-            // real bass, felt directly
-            float subSig = splitSub_.process(mono);
-            float bassSig = splitBass_.process(mono);
             float subE = splitSubF_.process(subSig);
             float bassE = splitBassF_.process(bassSig);
             // drums: the kick band's transient, and the snare band's, each
             // shaped into a thump with a pitch drop so hits read as hits
-            float snareOn = analyzer.out.bandOnset[1].load();
             if (thump > 0) { kickEnv_ = std::max(kickEnv_, thump); kickPitch_ = 1.0f; }
-            if (snareOn > 0.6f && snareOn > prevBandOnset_[1] + 0.2f) snareEnv_ = std::max(snareEnv_, snareOn * 0.8f);
-            prevBandOnset_[1] = snareOn;
             kickEnv_ *= 1.0f - 1.0f / (0.09f * kSR);
             snareEnv_ *= 1.0f - 1.0f / (0.05f * kSR);
             kickPitch_ *= 1.0f - 1.0f / (0.04f * kSR);
@@ -431,7 +509,7 @@ void Engine::process(const float* inL, const float* inR, float** out, int n) {
             // piano, low synth) that the rings cannot reproduce directly:
             // folded down, lifted, so a quiet low line is still felt ──
             float lowHz = lowHzSm_.tick(freq * 0.5f); // an octave under the rings' root
-            float lowE = lifted(splitLowF_.process(splitLowBand_.process(mono)));
+            float lowE = lifted(splitLowF_.process(splitLowBand_.process(monoLow)));
             float lowPres = analyzer.out.bandPeakMag[0].load();
             lowGate_ += ((lowPres > 0.15f ? 1.0f : 0.0f) - lowGate_) * (1.0f / (0.12f * kSR));
             float low = std::sin(oscLow_.phase) * lowE * lowGate_;
@@ -451,12 +529,83 @@ void Engine::process(const float* inL, const float* inR, float** out, int n) {
             }
         }
 
+        // ── MONO / STEREO / BODY: the song itself, felt ──
+        float mix[NZONES] = {0, 0, 0, 0, 0}, mixR[NZONES] = {0, 0, 0, 0, 0};
+        if (mode >= 2) {
+            // octave-down copy of the 80-160 Hz bass (a note the rings cannot
+            // move) on the tracked root, so a high bass line is still felt
+            float subhE = subHarmF_.process(subHarmBand_.process(monoLow));
+            float subhHz = subhHzSm_.tick(foldHz(f0, 30.0f, 60.0f));
+            float subh = oscSubh_.tick(subhHz, kSR) * subhE;
+            if (mode == 2) {
+                // MONO: 18-160 Hz to every zone (rings band-limit to 80 below),
+                // the 18-80 bass exaggerated x2 = the low end itself plus once more
+                float lowRing = lowBandM_.process(monoRing);
+                float lowFeet = lowBandL_.process(monoFeet);      // own filter state for the feet tap
+                float bassX = bassSig + subSig;                    // 8-80 Hz, once more = x2
+                for (int z = 0; z < NZONES; z++) mix[z] = (z == FEET ? lowFeet : lowRing) + bassX + subh * 0.9f;
+            } else if (mode == 3) {
+                // STEREO: left / right low end with the low-end width doubled
+                // (bass is nearly mono in most mixes; x2 side makes a pan felt)
+                float mid = 0.5f * (lowL + lowR), side = 0.5f * (lowL - lowR);
+                float lL = lowBandL_.process(mid + 2.0f * side);
+                float lR = lowBandR_.process(mid - 2.0f * side);
+                float bassX = bassSig + subSig;
+                float lowFeet = lowBandM_.process(monoFeet);
+                for (int z = 0; z < NZONES; z++) {
+                    if (z == FEET) { mix[z] = mixR[z] = lowFeet + bassX + subh * 0.9f; }
+                    else { mix[z] = lL + 0.5f * bassX + subh * 0.7f; mixR[z] = lR + 0.5f * bassX + subh * 0.7f; }
+                }
+            } else {
+                // BODY: 3 channels. Centre = the voice on HEAD+HEART, mains = the
+                // bass line + drums on BELLY+ROOT, LFE = the sub on FEET (+10 dB,
+                // bass-managed: only what the ButtKicker can move)
+                float centre = split[HEAD] * 0.9f;                       // voice + snare
+                float mains  = split[ROOT] * 0.8f + split[BELLY] * 0.8f; // bass line, low instruments, kick
+                float lfe    = subSig * 3.16f * 3.2f + subh * 0.8f;
+                mix[HEAD] = centre; mix[HEART] = centre;
+                mix[BELLY] = mains; mix[ROOT] = mains;
+                mix[FEET] = lfe;
+            }
+        }
+        // bass-drop detector (all modes track it; BODY fires the effect)
+        {
+            // raw (un-normalized) sub level against a 60 s peak: a lull is the
+            // sub under 15% of that peak or under -40 dBFS; a drop is a hit,
+            // after 1.5 s of lull, that brings it back over 60% of the peak
+            // (or 6x the lull level). Judged 40 ms after the hit, when the
+            // kick's own sub energy and the 10 ms follower are both in.
+            const float subRaw = subF_.env;
+            subAbsMax_ = std::max(subRaw, subAbsMax_ * (1.0f - 1.0f / (60.0f * kSR)));
+            const bool subQuiet = subRaw < std::max(0.01f, 0.15f * subAbsMax_);
+            if (dropRefrac_ > 0) dropRefrac_--;
+            if (thump > 0 && subQuietS_ > 1.5f && dropRefrac_ == 0 && dropArm_ == 0)
+                dropArm_ = (long)(0.040f * kSR);
+            if (dropArm_ > 0 && --dropArm_ == 0) {
+                if (subRaw > std::max(std::max(0.4f * subAbsMax_, 6.0f * subQuietLvl_), 0.02f)) {
+                    dropRefrac_ = dropRefracLen;
+                    subQuietS_ = 0;
+                    dropFlash.store(1.0f);
+                    if (mode == 4) { dropT_ = 0; for (int z = 0; z < NZONES; z++) dropPh_[z] = 0; }
+                }
+            }
+            if (subQuiet) {
+                subQuietS_ += 1.0f / kSR;
+                subQuietLvl_ += (subRaw - subQuietLvl_) * (1.0f / (0.5f * kSR));
+            } else if (dropArm_ == 0 && subRaw > 0.3f * subAbsMax_) {
+                subQuietS_ = 0;
+            }
+            if (dropT_ >= 0) { dropT_ += 1.0f / kSR; if (dropT_ > 1.6f) dropT_ = -1; }
+        }
+
         // ── mix per zone ──
         for (int z = 0; z < NZONES; z++) {
             int d = maxDelay > 0 ? (z * maxDelay) / 4 : 0;
             float sweep = d > 0 ? sweepDelay_.tap(d) : sweepBase;
-            float s;
-            if (splitMode) {
+            float s, sR = 0;
+            if (mode >= 2) {
+                s = mix[z]; sR = mixR[z];
+            } else if (splitMode) {
                 // the layer itself, plus a little of the shared pulse so the
                 // whole body still agrees on the downbeat
                 s = split[z] + pulses * pulseW[z] * 0.15f + sweep * bodyFlow * 0.12f;
@@ -469,17 +618,34 @@ void Engine::process(const float* inL, const float* inR, float** out, int n) {
             }
             s *= zoneLevel[z];
             s = zoneLP_[z].process(zoneHP_[z].process(s));
+            if (stereoMode) { sR *= zoneLevel[z]; sR = zoneLPR_[z].process(zoneHPR_[z].process(sR)); }
 
             // gentle running-peak calibration (slow, low max gain, so it can't
-            // fight the song's dynamics), then the breath gain rides on top
-            zonePeak_[z] = std::max(std::fabs(s), zonePeak_[z] * (1.0f - 1.0f / (30.0f * kSR)));
+            // fight the song's dynamics), then the breath gain rides on top.
+            // In STEREO both sides share one gain so the image is preserved.
+            float pk = stereoMode ? std::max(std::fabs(s), std::fabs(sR)) : std::fabs(s);
+            zonePeak_[z] = std::max(pk, zonePeak_[z] * (1.0f - 1.0f / (30.0f * kSR)));
             float g = zonePeak_[z] > 1e-4f ? (intensity * 0.9f) / zonePeak_[z] : 0.0f;
             g = std::min(g, 6.0f);
             float warmG = warmup_ <= warmHold ? 0.0f
                           : std::min(1.0f, (float)(warmup_ - warmHold) / warmRamp);
-            float o = s * g * breathG_ * charGain * swell * warmG;
+            const float chainG = g * breathG_ * charGain * swell * warmG * (1.0f - voidDepth * voidEnv_);
+            float o = s * chainG;
+            float oR = sR * chainG;
             // the void ducks only the music chain — pads still strike into it
-            o *= 1.0f - voidDepth * voidEnv_;
+            // (folded into chainG above)
+            // BODY drop effect: a head-to-toe roll, 110 ms per zone, pitch 70 → 30 Hz
+            if (dropT_ >= 0) {
+                float t = dropT_ - z * 0.11f;
+                if (t > 0) {
+                    float env = std::min(t / 0.03f, 1.0f) * std::exp(-std::max(0.0f, t - 0.05f) / 0.35f);
+                    float f = 30.0f + 40.0f * std::exp(-t * 6.0f);
+                    dropPh_[z] += dsp::kTwoPi * f / kSR;
+                    if (dropPh_[z] > dsp::kTwoPi) dropPh_[z] -= dsp::kTwoPi;
+                    float y = std::sin(dropPh_[z]) * env * intensity * 1.1f;
+                    o += y; oR += y;
+                }
+            }
 
             // pad play rides on top of the music chain (not through breath/AGC,
             // so the octagon is playable even in total silence)
@@ -529,12 +695,14 @@ void Engine::process(const float* inL, const float* inR, float** out, int n) {
                         float cyc = std::fmod(t, 1.0f / 11.0f);
                         y *= std::exp(-cyc / 0.04f);
                     }
-                    o += pd.gain * intensity * padEnv_[z] * y;
+                    float py = pd.gain * intensity * padEnv_[z] * y;
+                    o += py; oR += py;
                 }
             }
             o *= fxG_ * tremG;
             o = std::max(-1.0f, std::min(1.0f, o));
             out[z][i] = o;
+            if (stereoMode) { oR *= fxG_ * tremG; vibR_[z][i] = std::max(-1.0f, std::min(1.0f, oR)); }
             if (doScope) vibScope[z][scopeIdx] = o;
             peakAcc[z + 2] = std::max(peakAcc[z + 2], std::fabs(o));
         }
@@ -543,22 +711,37 @@ void Engine::process(const float* inL, const float* inR, float** out, int n) {
         warmup_++;
 
         if ((i & 1023) == 0) {
-            if (!splitMode) {
-                zoneHz[HEAD].store(highFreq <= zoneHzMax(HEAD) ? highFreq : freq);
-                zoneHz[HEART].store(freq);
+            if (mode >= 2) {
+                float sh = subhHzSm_.v;
+                for (int z = 0; z < NZONES; z++) zoneHz[z].store(z == FEET ? feetFreq : sh);
+            } else {
+                if (!splitMode) {
+                    zoneHz[HEAD].store(highFreq <= zoneHzMax(HEAD) ? highFreq : freq);
+                    zoneHz[HEART].store(freq);
+                }
+                zoneHz[BELLY].store(freq);
+                if (!splitMode) zoneHz[ROOT].store(subFreq);
+                zoneHz[FEET].store(feetFreq);
             }
-            zoneHz[BELLY].store(freq);
-            if (!splitMode) zoneHz[ROOT].store(subFreq);
-            zoneHz[FEET].store(feetFreq);
         }
     }
 
     breathNow.store(breathG_);
+    { float d = dropFlash.load(); if (d > 0) dropFlash.store(d * 0.97f); }
 
     // meter ballistics
     for (int m = 0; m < NZONES + 2; m++) {
         float cur = meter[m].load();
         float nx = peakAcc[m];
         meter[m].store(nx > cur ? nx : cur * 0.85f);
+    }
+}
+
+void Engine::delayMusic(const float* L, const float* R, float* oL, float* oR, int n) {
+    const int look = look_;
+    for (int i = 0; i < n; i++) {
+        lookL_.push(L[i]); lookR_.push(R[i]);
+        oL[i] = look > 0 ? lookL_.tap(look) : L[i];
+        oR[i] = look > 0 ? lookR_.tap(look) : R[i];
     }
 }
