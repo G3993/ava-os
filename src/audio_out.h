@@ -11,6 +11,7 @@
 #include <vector>
 #include "ringbuf.h"
 #include "engine.h"
+#include "stem_player.h"
 
 struct OutDevice {
     unsigned id;
@@ -48,6 +49,9 @@ public:
     // optional second stereo ring (live input from the interface); summed
     // with the tap before the engine. Set by the app, may be null.
     StereoRing* inRing = nullptr;
+    // optional stem player: while it is active its stems replace the engine's
+    // vibration and the tapped music (the engine still analyses the music)
+    StemPlayer* player = nullptr;
     // live input goes to the ENGINE only by default (felt, not heard); on =
     // also mixed into the music / surround sends
     std::atomic<bool> inToSpeakers{false};
@@ -73,5 +77,6 @@ public:
 };
 
 // shared mixer (audio_mix.cpp) used by every platform backend
+// vibR: per-zone right-side signal for send 2 (STEREO mode) or null entries
 void mixOutputBlock(OutputUnit* self, Engine* eng, const float* L, const float* R,
-                    float* const* vib, float* dst, int n, int ch);
+                    float* const* vib, const float* const* vibR, float* dst, int n, int ch);

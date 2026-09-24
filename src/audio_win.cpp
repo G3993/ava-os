@@ -135,10 +135,23 @@ static void outDataCB(ma_device* dev, void* output, const void*, ma_uint32 frame
         if (avail > target + 2 * n) ring->discard(avail - target);
     }
     self->ring()->pop(L.data(), R.data(), n);
+    if (self->player && self->player->active()) {
+        static thread_local std::vector<float> stem[NZONES];
+        float* stemPtr[NZONES];
+        for (int z = 0; z < NZONES; z++) { stem[z].resize(n); stemPtr[z] = stem[z].data(); }
+        if (self->player->render(L.data(), R.data(), stemPtr, n)) {
+            eng->process(L.data(), R.data(), vibPtr, n);
+            mixOutputBlock(self, eng, L.data(), R.data(), stemPtr, nullptr, (float*)output, n,
+                           (int)dev->playback.channels);
+            return;
+        }
+    }
     eng->process(L.data(), R.data(), vibPtr, n);
     eng->delayMusic(L.data(), R.data(), L.data(), R.data(), n);
+    const float* vibR[NZONES];
+    for (int z = 0; z < NZONES; z++) vibR[z] = eng->rightOut(z);
 
-    mixOutputBlock(self, eng, L.data(), R.data(), vibPtr, (float*)output, n,
+    mixOutputBlock(self, eng, L.data(), R.data(), vibPtr, vibR, (float*)output, n,
                    (int)dev->playback.channels);
 }
 

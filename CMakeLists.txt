@@ -49,6 +49,7 @@ set(AVA_COMMON_SRC
   src/audio_mix.cpp
   src/engine.cpp
   src/analysis.cpp
+  src/stem_player.cpp
   src/shaderhost.cpp)
 
 if(APPLE)
@@ -60,6 +61,7 @@ if(APPLE)
     src/audio_out.cpp
     src/capture_tap.mm
     src/audio_in.mm
+    src/file_dialog.mm
     src/midi_in.mm
     src/midi_out.mm
     src/mac_fullscreen.mm)
@@ -87,6 +89,7 @@ if(APPLE)
 elseif(WIN32)
   add_executable(AVAOS
     ${AVA_COMMON_SRC}
+    src/file_dialog_win.cpp
     src/audio_win.cpp
     src/glplat_win.cpp)
   # GL declarations come from src/glplat.h, not the system header

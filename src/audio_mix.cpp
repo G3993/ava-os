@@ -8,7 +8,7 @@
 #include <cstring>
 
 void mixOutputBlock(OutputUnit* self, Engine* eng, const float* L, const float* R,
-                    float* const* vib, float* dst, int n, int ch) {
+                    float* const* vib, const float* const* vibR, float* dst, int n, int ch) {
     float vol = eng->params.masterVolume.load();
     bool monitor = eng->params.monitorVibOnStereo.load() != 0;
 
@@ -23,7 +23,7 @@ void mixOutputBlock(OutputUnit* self, Engine* eng, const float* L, const float* 
     int zc[NZONES], zc2[NZONES];
     float zt[NZONES];
     const float* vR[NZONES];
-    for (int z = 0; z < NZONES; z++) vR[z] = eng->rightOut(z);
+    for (int z = 0; z < NZONES; z++) vR[z] = vibR ? vibR[z] : nullptr;
     int solo = eng->params.soloZone.load();
     for (int z = 0; z < NZONES; z++) {
         zc[z] = eng->params.zoneChan[z].load();

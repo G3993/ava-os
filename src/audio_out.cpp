@@ -98,12 +98,26 @@ static OSStatus renderCB(void* inRefCon, AudioUnitRenderActionFlags*,
             }
         }
     }
+    AudioBuffer& b = ioData->mBuffers[0];
+    // an active stem player owns the output: its music pair and its five zone
+    // stems, already aligned by the author — no look-ahead, no engine vibration
+    if (self->player && self->player->active()) {
+        static thread_local std::vector<float> stem[NZONES];
+        float* stemPtr[NZONES];
+        for (int z = 0; z < NZONES; z++) { stem[z].resize(n); stemPtr[z] = stem[z].data(); }
+        if (self->player->render(mL.data(), mR.data(), stemPtr, n)) {
+            eng->process(mL.data(), mR.data(), vibPtr, n);   // analysis + visuals only
+            mixOutputBlock(self, eng, mL.data(), mR.data(), stemPtr, nullptr, (float*)b.mData, n,
+                           (int)b.mNumberChannels);
+            return noErr;
+        }
+    }
     eng->process(L.data(), R.data(), vibPtr, n);
     // speakers get the music held back by the sync look-ahead, in step with the felt output
     eng->delayMusic(mL.data(), mR.data(), mL.data(), mR.data(), n);
-
-    AudioBuffer& b = ioData->mBuffers[0];
-    mixOutputBlock(self, eng, mL.data(), mR.data(), vibPtr, (float*)b.mData, n,
+    const float* vibR[NZONES];
+    for (int z = 0; z < NZONES; z++) vibR[z] = eng->rightOut(z);
+    mixOutputBlock(self, eng, mL.data(), mR.data(), vibPtr, vibR, (float*)b.mData, n,
                    (int)b.mNumberChannels);
     return noErr;
 }

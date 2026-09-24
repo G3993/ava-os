@@ -18,6 +18,8 @@
 #include "engine.h"
 #include "capture_tap.h"
 #include "audio_out.h"
+#include "stem_player.h"
+#include "file_dialog.h"
 #ifdef __APPLE__
 #include "audio_in.h"
 #endif
@@ -46,6 +48,8 @@ static Engine gEngine;
 static SystemTap gTap;
 static OutputUnit gOut;
 static StereoRing gRing;
+static StemPlayer gPlayer;      // authored multichannel sets (stems) played straight to the bed
+static std::string gPlayerMsg;  // last load result for the Play tab
 #ifdef __APPLE__
 static StereoRing gInRing;   // live input from the interface (guitar, mic…)
 static InputUnit gIn;
@@ -55,7 +59,7 @@ static std::vector<OutDevice> gDevices;
 static int gSelDevice = -1;
 static int gActiveTab = 0;
 static int gMode = 0;        // right card: 0 Audio · 1 Visual · 2 Artifact
-static int gArtifactTab = 0; // Artifact: 0 Sounds · 1 Tuner · 2 MIDI
+static int gArtifactTab = 0; // Artifact: 0 Sounds · 1 Tuner · 2 MIDI · 3 Play
 static float gZoneSlider[NZONES] = {0.65f, 0.6f, 0.8f, 0.75f, 0.75f};
 static float gEdgeFade = 0.0f; // black vignette on the shader/projector output
 static float gMasterVol = 1.0f;
@@ -1713,6 +1717,66 @@ static void drawIcon(ImDrawList* d, int icon, ImVec2 c, float s, ImU32 col) {
 
 // ARTIFACT panel, SOUNDS: one scrolling page of sections (no inner tabs).
 // Each tile is icon + name + one short hint, clipped to its own bounds.
+// ── PLAY: an authored multichannel set, stems straight to the bed ──
+static void fmtTime(char* out, size_t n, double sec) {
+    int s = (int)sec; snprintf(out, n, "%d:%02d", s / 60, s % 60);
+}
+static void drawPlayBody(float w) {
+    ImGui::TextDisabled("SET   ·   stems exported from Ableton, one file per zone, straight to the bed");
+    ImGui::Spacing();
+    if (ImGui::Button("Load set folder…", ImVec2(150, 28))) {
+        std::string p = pickFolderDialog("Choose the set folder");
+        if (!p.empty()) {
+            if (gPlayer.load(p)) gPlayerMsg = "loaded " + gPlayer.name; else gPlayerMsg = gPlayer.lastError;
+        }
+    }
+    ImGui::SameLine();
+    ImGui::TextDisabled("or drop the folder on the window");
+    if (!gPlayerMsg.empty()) { ImGui::Spacing(); ImGui::TextWrapped("%s", gPlayerMsg.c_str()); }
+    if (!gPlayer.loaded()) {
+        ImGui::Spacing(); ImGui::Separator(); ImGui::Spacing();
+        ImGui::TextDisabled("Export from Ableton: File > Export Audio/Video, Rendered Track = Selected Tracks Only");
+        ImGui::TextDisabled("with the five zone returns + Master selected, 48 kHz, 24-bit WAV, Normalize off.");
+        ImGui::TextDisabled("Files are matched by name: head / heart / belly / root (butt) / feet, master or hp.");
+        return;
+    }
+    ImGui::Spacing();
+    ImGui::Text("%s", gPlayer.name.c_str());
+    static const char* stemNames[StemPlayer::kStems] = {"MUSIC", "HEAD", "HEART", "BELLY", "BUTT", "FEET"};
+    for (int k = 0; k < StemPlayer::kStems; k++) {
+        if (k) ImGui::SameLine();
+        float pk = gPlayer.stemPeak[k].load();
+        ImVec4 col = gPlayer.has[k] ? ImVec4(0.55f + 0.45f * std::min(1.0f, pk * 2), 1, 0.7f, 1) : ImVec4(1, 1, 1, 0.25f);
+        ImGui::TextColored(col, "%s%s", gPlayer.has[k] ? "" : "no ", stemNames[k]);
+        if (gPlayer.has[k] && ImGui::IsItemHovered()) ImGui::SetTooltip("%s", gPlayer.stemFile[k].c_str());
+    }
+    ImGui::Spacing();
+    // transport
+    bool playing = gPlayer.playing();
+    if (ImGui::Button(playing ? "Pause" : "Play", ImVec2(70, 28))) {
+        if (playing) gPlayer.pause();
+        else { if (!gPlaying) startAudio(); gPlayer.play(); }
+    }
+    ImGui::SameLine();
+    if (ImGui::Button("Stop", ImVec2(70, 28))) gPlayer.stop();
+    ImGui::SameLine();
+    char tp[16], tl[16]; fmtTime(tp, sizeof(tp), gPlayer.positionSec()); fmtTime(tl, sizeof(tl), gPlayer.lengthSec());
+    ImGui::Text("%s / %s", tp, tl);
+    if (gPlayer.filling.load()) { ImGui::SameLine(); ImGui::TextDisabled("…"); }
+    ImGui::SetNextItemWidth(w - 8);
+    float pos = (float)gPlayer.positionSec();
+    if (ImGui::SliderFloat("##pos", &pos, 0.0f, (float)gPlayer.lengthSec(), "")) gPlayer.seek(pos);
+    if (gPlayer.leadInSec() > 1.0) {
+        char li[16]; fmtTime(li, sizeof(li), gPlayer.leadInSec());
+        ImGui::TextDisabled("starts at %s (leading silence skipped)", li);
+    }
+    ImGui::Spacing();
+    ImGui::TextDisabled(gPlayer.active() ? "stems own the bed: engine vibration is bypassed, music pair = the set's own music"
+                                         : "stopped: live engine is back on the tapped music");
+    ImGui::Spacing();
+    if (ImGui::SmallButton("Unload")) { gPlayer.unload(); gPlayerMsg.clear(); }
+}
+
 static void drawSoundsBody(float w) {
     buildVfx();
     double tnow = glfwGetTime();
@@ -1960,6 +2024,12 @@ int main(int argc, char** argv) {
     glfwWindowHint(GLFW_OPENGL_PROFILE, GLFW_OPENGL_CORE_PROFILE);
     glfwWindowHint(GLFW_OPENGL_FORWARD_COMPAT, GL_TRUE);
     GLFWwindow* win = glfwCreateWindow(1500, 860, "AVA OS", nullptr, nullptr);
+    // drop a set folder (or one of its stems) anywhere on the window to load it
+    glfwSetDropCallback(win, [](GLFWwindow*, int count, const char** paths) {
+        if (count < 1) return;
+        if (gPlayer.load(paths[0])) { gPlayerMsg = "loaded " + gPlayer.name; gMode = 2; gArtifactTab = 3; }
+        else gPlayerMsg = gPlayer.lastError;
+    });
     glfwMakeContextCurrent(win);
     glplatInit(); // no-op on macOS; loads GL entry points on Windows
     glfwSwapInterval(1);
@@ -2013,6 +2083,7 @@ int main(int argc, char** argv) {
 
     gEngine.init();
     gRing.init(48000); // 1 s
+    gOut.player = &gPlayer;
     gDevices = listOutputDevices();
     // default: first device with >=7 out channels (the interface), else default
     for (int i = 0; i < (int)gDevices.size(); i++)
@@ -2620,13 +2691,13 @@ int main(int argc, char** argv) {
                 drawVisualBody(win);
             } else {
                 // ARTIFACT sub-tabs: Sounds · Tuner · MIDI
-                static const char* subs[3] = {"Sounds", "Tuner", "MIDI"};
+                static const char* subs[4] = {"Sounds", "Tuner", "MIDI", "Play"};
                 ImDrawList* cdl = ImGui::GetWindowDrawList();
                 ImVec2 s0 = ImGui::GetCursorScreenPos();
                 // secondary selector: plain words with an underline, no pills (the
                 // pills belong to the mode row alone)
                 float x = s0.x, sh = 22;
-                for (int t = 0; t < 3; t++) {
+                for (int t = 0; t < 4; t++) {
                     ImVec2 ts = ImGui::CalcTextSize(subs[t]);
                     ImVec2 b0(x, s0.y), b1(x + ts.x, s0.y + sh);
                     ImGui::SetCursorScreenPos(b0);
@@ -2640,7 +2711,8 @@ int main(int argc, char** argv) {
                 ImGui::SetCursorScreenPos(ImVec2(s0.x, s0.y + sh + 18));
                 if (gArtifactTab == 0) drawSoundsBody(bw);
                 else if (gArtifactTab == 1) drawTunerBody();
-                else drawMidiBody();
+                else if (gArtifactTab == 2) drawMidiBody();
+                else drawPlayBody(bw);
             }
             ImGui::EndChild();
             ImGui::PopStyleVar();
