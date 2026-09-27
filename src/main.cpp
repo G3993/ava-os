@@ -11,6 +11,7 @@
 #include <algorithm>
 #include <thread>
 #include <chrono>
+#include <csignal>
 #ifndef _WIN32
 #include <sys/stat.h>
 #endif
@@ -185,7 +186,30 @@ static void playToneAsync(const std::string& path) {
 #endif
 }
 
+// The system-audio tap is started off the main thread. coreaudiod answers
+// tap requests slowly at times, and not at all when a previous tap holder
+// was force-killed; the window must keep drawing either way and just say so.
+static std::atomic<int> gTapState{0};   // 0 idle · 1 starting · 2 finished
+static std::string gTapErr;             // copy of the tap's error, read once state == 2
+static double gTapStartT = 0;
+static void startTapAsync() {
+    if (gTapState.load() == 1 || gTap.running()) return;
+    gTapState.store(1);
+    gTapStartT = glfwGetTime();
+    std::thread([] {
+        gTap.start(&gRing);
+        gTapErr = gTap.lastError;
+        gTapState.store(2);
+    }).detach();
+}
+// Ctrl-C / kill: leave through the normal shutdown so the tap and its
+// aggregate device are destroyed — killing a tap holder outright is what
+// wedges coreaudiod for every later launch
+static std::atomic<bool> gQuit{false};
+static void onQuitSignal(int) { gQuit.store(true); }
+
 #ifdef __APPLE__
+
 // live input follows the engine's device: on = capture that interface's inputs
 static void setInput(bool on) {
     gInOn = on;
@@ -201,7 +225,7 @@ static void setInput(bool on) {
 }
 #endif
 static void startAudio() {
-    if (!gTap.running()) gTap.start(&gRing);
+    if (!gTap.running()) startTapAsync();
     if (!gOut.running() && gSelDevice >= 0 && gSelDevice < (int)gDevices.size())
         gOut.start(gDevices[gSelDevice].id, &gEngine, &gRing);
 #ifdef __APPLE__
@@ -2491,7 +2515,9 @@ int main(int argc, char** argv) {
     if (getenv("AVA_SETTINGS")) gShowHealth = true;
     if (getenv("AVA_MINI")) setMini(win, true);
     if (const char* sh = getenv("AVA_SHADER")) { gShaders.loadLibrary(shaderLibraryDir()); gShaders.load(atoi(sh)); }
-    gTap.start(&gRing);
+    signal(SIGTERM, onQuitSignal);
+    signal(SIGINT, onQuitSignal);
+    startTapAsync();
     startAudio(); // live on launch
 #ifdef __APPLE__
     gMidi.start(); // any pad controller auto-connects (2 s hot-plug rescan)
@@ -2504,7 +2530,7 @@ int main(int argc, char** argv) {
     gShaders.loadLibrary(shaderLibraryDir());
     gShaderT0 = glfwGetTime();
 
-    while (!glfwWindowShouldClose(win)) {
+    while (!glfwWindowShouldClose(win) && !gQuit.load()) {
         glfwPollEvents();
 
         // Escape: close the projector output first, else leave fullscreen
@@ -3283,8 +3309,11 @@ int main(int argc, char** argv) {
             gEngine.params.uplift.store(bal);
             gEngine.params.grounding.store(1.0f - bal);
             // tap/output error, if any, under the grid
-            if (!gTap.running() && !gTap.lastError.empty())
-                dl->AddText(ImVec2(px, ry(2) - 6), IM_COL32(255, 120, 120, 200), gTap.lastError.c_str());
+            if (gTapState.load() == 1 && glfwGetTime() - gTapStartT > 4.0)
+                dl->AddText(ImVec2(px, ry(2) - 6), IM_COL32(255, 180, 90, 220),
+                            "Waiting for the Mac's audio system... if this stays, run: sudo killall coreaudiod");
+            else if (gTapState.load() == 2 && !gTap.running() && !gTapErr.empty())
+                dl->AddText(ImVec2(px, ry(2) - 6), IM_COL32(255, 120, 120, 200), gTapErr.c_str());
             else if (!gOut.running() && !gOut.lastError.empty())
                 dl->AddText(ImVec2(px, ry(2) - 6), IM_COL32(255, 120, 120, 200), gOut.lastError.c_str());
         }
@@ -3327,7 +3356,9 @@ int main(int argc, char** argv) {
                 if (signal) dl->AddCircleFilled(dp, 9, IM_COL32(80, 220, 120, 45));
                 dl->AddCircleFilled(dp, 4.5f, signal ? IM_COL32(80, 220, 120, 255) : W(0.20f));
                 if (ImGui::IsMouseHoveringRect(ImVec2(dp.x - 10, dp.y - 10), ImVec2(dp.x + 10, dp.y + 10)))
-                    ImGui::SetTooltip(signal ? "hearing your music" : "no music playing on this Mac");
+                    ImGui::SetTooltip(signal ? "hearing your music"
+                                      : gTapState.load() == 1 ? "waiting for the Mac's audio system"
+                                      : "no music playing on this Mac");
             }
 #ifdef __APPLE__
             // MIDI: the controller's name while one is plugged in, flashing on
@@ -3405,7 +3436,7 @@ int main(int argc, char** argv) {
     }
 
     stopAudio();
-    gTap.stop();
+    if (gTapState.load() != 1) gTap.stop();   // never touch a tap still being created
 #ifdef __APPLE__
     outNoteOff();
     gMidiOut.stop();
