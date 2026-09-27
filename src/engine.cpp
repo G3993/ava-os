@@ -186,6 +186,7 @@ void Engine::process(const float* inL, const float* inR, float** out, int n) {
     // Transient layers (kick, snare) never pass through it, so punch stays.
     const float liftExp = 1.0f - 0.6f * std::min(1.0f, std::max(0.0f, params.lift.load()));
     auto lifted = [liftExp](float e) { return e > 1e-4f ? std::pow(e, liftExp) : 0.0f; };
+    float pkPulse = 0, pkFlow = 0, pkWarm = 0, pkDepth = 0, pkDyn = 0, pkLift = 0;
     const float fxTremD = params.fxTrem.load();
     const float fxCoef = std::exp(-1.0f / (0.008f * kSR));
 
@@ -322,6 +323,7 @@ void Engine::process(const float* inL, const float* inR, float** out, int n) {
         // slow tidal swell (~14 s period): deep for ambient, subtle for beats
         float swellDepth = dynAmt * (0.06f + 0.24f * (1.0f - rhythmSm_));
         float swell = 1.0f - swellDepth * (0.5f + 0.5f * lfoSwell_.tick(0.07f, kSR));
+        pkDyn = std::max(pkDyn, 1.0f - charGain * swell);
         // breath pacer: raised-sine swell at a breathing rate on top
         {
             float ph = params.pacerHz.load();
@@ -420,6 +422,10 @@ void Engine::process(const float* inL, const float* inR, float** out, int n) {
         // ── module B: transient pulses ──
         float pulses = (carrier * (1.0f - grounding * 0.6f) + sub * (grounding * 0.6f))
                        * onsetEnv_ * pulseSync;
+        pkPulse = std::max(pkPulse, onsetEnv_ * pulseSync);
+        pkWarm = std::max(pkWarm, warmth * std::min(1.0f, rmsEnv));
+        pkDepth = std::max(pkDepth, subDepth * std::min(1.0f, subEnv * 1.5f));
+        pkLift = std::max(pkLift, lifted(std::min(1.0f, rmsEnv)) - std::min(1.0f, rmsEnv));
 
         // ── module C: entrainment (group A vs B, 180°) ──
         float entA = 0, entB = 0;
@@ -436,6 +442,7 @@ void Engine::process(const float* inL, const float* inR, float** out, int n) {
         // ── module D: body sweep with per-zone delay taps ──
         float sweepBase = carrier * 0.5f * (1.0f + lfoSweep_.tick(sweepRate, kSR)) * rmsEnv;
         sweepDelay_.push(sweepBase);
+        pkFlow = std::max(pkFlow, bodyFlow * std::fabs(sweepBase) * 2.0f);
 
         // ── module E: zone accents ──
         // each zone's accent follows the band that belongs to that body area:
@@ -728,6 +735,25 @@ void Engine::process(const float* inL, const float* inR, float** out, int n) {
 
     breathNow.store(breathG_);
     { float d = dropFlash.load(); if (d > 0) dropFlash.store(d * 0.97f); }
+    // live parameter activity for the UI (same ballistics as the meters)
+    {
+        auto hold = [](std::atomic<float>& a, float nx) {
+            float cur = a.load();
+            a.store(nx > cur ? nx : cur * 0.85f);
+        };
+        hold(livePulse, std::min(1.0f, pkPulse));
+        hold(liveFlow, std::min(1.0f, pkFlow));
+        hold(liveWarmth, std::min(1.0f, pkWarm));
+        hold(liveDepth, std::min(1.0f, pkDepth));
+        hold(liveDyn, std::min(1.0f, pkDyn * 2.0f));
+        hold(liveLift, std::min(1.0f, pkLift * 2.5f));
+        float mean = 0, up = 0, down = 0;
+        for (int z = 0; z < NZONES; z++) mean += peakAcc[2 + z];
+        up = std::max(peakAcc[2 + HEAD], peakAcc[2 + HEART]);
+        down = std::max(peakAcc[2 + ROOT], peakAcc[2 + FEET]);
+        hold(liveIntensity, std::min(1.0f, mean / NZONES * 1.5f));
+        hold(liveBalance, (up + down) > 1e-3f ? up / (up + down) : 0.5f);
+    }
 
     // meter ballistics
     for (int m = 0; m < NZONES + 2; m++) {

@@ -31,6 +31,8 @@ static bool ensureContext() {
     return true;
 }
 
+unsigned defaultOutputDevice() { return 0; } // miniaudio: index 0 is the default playback device
+
 std::vector<OutDevice> listOutputDevices() {
     std::vector<OutDevice> out;
     if (!ensureContext()) return out;

@@ -5,6 +5,17 @@
 #include <cmath>
 #include <cstring>
 
+unsigned defaultOutputDevice() {
+    AudioObjectID id = kAudioObjectUnknown;
+    UInt32 sz = sizeof(id);
+    AudioObjectPropertyAddress addr = {kAudioHardwarePropertyDefaultOutputDevice,
+                                       kAudioObjectPropertyScopeGlobal,
+                                       kAudioObjectPropertyElementMain};
+    if (AudioObjectGetPropertyData(kAudioObjectSystemObject, &addr, 0, nullptr, &sz, &id) != noErr)
+        return 0;
+    return id == kAudioObjectUnknown ? 0 : (unsigned)id;
+}
+
 std::vector<OutDevice> listOutputDevices() {
     std::vector<OutDevice> out;
     AudioObjectPropertyAddress addr = {kAudioHardwarePropertyDevices,
@@ -163,6 +174,7 @@ bool maxDeviceHwVolume(unsigned deviceID) {
 }
 
 bool OutputUnit::start(unsigned deviceID, Engine* engine, StereoRing* ring) {
+    tapMutesSource = true; // CATapMutedWhenTapped in capture_tap.mm
     stop();
     engine_ = engine;
     ring_ = ring;

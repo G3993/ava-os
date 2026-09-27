@@ -46,11 +46,31 @@ void mixOutputBlock(OutputUnit* self, Engine* eng, const float* L, const float* 
 
     std::memset(dst, 0, (size_t)n * ch * sizeof(float));
     if (ch <= 2) {
+        // Plain stereo device (laptop, headphones, a DJ's built-in output):
+        // this is what every download runs on. When the tap has muted the
+        // source apps we ARE the speakers, so the music passes through at
+        // unity (already delayed by the sync look-ahead); the vibration bus
+        // rides underneath as an audible monitor so the bed can be heard
+        // pumping even without transducers.
+        float mg = self->tapMutesSource ? musicG : 0.0f;
         for (int i = 0; i < n; i++) {
-            float v = monitor ? 0.7f * 0.25f * (vib[HEART][i] + vib[BELLY][i] +
-                                                vib[ROOT][i] + vib[FEET][i]) : 0.0f;
-            dst[i * ch] = vol * v;
-            if (ch > 1) dst[i * ch + 1] = vol * v;
+            float v = monitor ? 0.7f * 0.5f * (vib[HEART][i] + vib[BELLY][i] +
+                                               vib[ROOT][i] + vib[FEET][i]) : 0.0f;
+            dst[i * ch] = vol * (mg * L[i] + v);
+            if (ch > 1) dst[i * ch + 1] = vol * (mg * R[i] + v);
+        }
+        // same limiter as the multichannel path
+        const float ceil = 0.98f, aRel = 1.0f / (0.15f * 48000.0f);
+        for (int c = 0; c < ch; c++) {
+            float g = self->limG_[c], minG = 1.0f;
+            for (int i = 0; i < n; i++) {
+                float& v = dst[(size_t)i * ch + c];
+                float a = std::fabs(v), tg = a > ceil ? ceil / a : 1.0f;
+                if (tg < g) g = tg; else g += (1.0f - g) * aRel;
+                v *= g; if (g < minG) minG = g;
+            }
+            self->limG_[c] = g;
+            self->chanLimRed[c].store(1.0f - minG, std::memory_order_relaxed);
         }
         captureMeters();
         return;

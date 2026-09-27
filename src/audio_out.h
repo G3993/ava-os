@@ -21,6 +21,10 @@ struct OutDevice {
 };
 
 std::vector<OutDevice> listOutputDevices();
+// the OS's current default output (what the user's music is playing through);
+// 0 if unknown. On macOS the tap mutes the source apps, so a fresh install
+// must play through this device or the music simply disappears.
+unsigned defaultOutputDevice();
 
 // hardware output volume scalars on a device (the knob between us and the
 // DACs): average across settable elements, or -1 if the device exposes none
@@ -55,6 +59,10 @@ public:
     // live input goes to the ENGINE only by default (felt, not heard); on =
     // also mixed into the music / surround sends
     std::atomic<bool> inToSpeakers{false};
+    // true when the capture path silences the source apps (macOS process
+    // tap): on a plain stereo device we must then play the music ourselves.
+    // WASAPI loopback (Windows) leaves the source audible, so false there.
+    bool tapMutesSource = false;
     std::atomic<int> pingLeft_{0}; // samples remaining (audio thread owned)
     float pingPhase_ = 0;
     // thermal guard state per device channel (zone channels only): running

@@ -354,6 +354,10 @@ private:
 
 public:
     std::atomic<float> breathNow{0}; // UI: current breath gain 0..1
+    // UI: what each engine parameter is doing right now (0..1, peak-held per
+    // block, decayed like the meters) — the "S" line under every knob
+    std::atomic<float> livePulse{0}, liveFlow{0}, liveWarmth{0}, liveDepth{0};
+    std::atomic<float> liveDyn{0}, liveLift{0}, liveIntensity{0}, liveBalance{0};
     std::atomic<long>  thumpCount{0}; // low-end hits detected so far (UI beat flash / tests)
     std::atomic<float> voidNow{0};   // UI: current void duck 0..1
     // audio features for the shader background (web-host uniform contract)
