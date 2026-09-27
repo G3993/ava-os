@@ -10,6 +10,10 @@ class SystemTap {
 public:
     bool start(StereoRing* ring);
     void stop();
+    // true = AVA becomes the speaker: the source apps are silenced and AVA
+    // re-plays the music itself (needed for the sync look-ahead on the
+    // interface). false = just listen; the music is never touched.
+    bool muteSources = false;
     bool running() const { return running_.load(); }
     std::string lastError;
     std::atomic<float> inputPeak{0};

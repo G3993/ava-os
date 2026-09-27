@@ -49,6 +49,11 @@ struct Params {
     // event is placed back at the sample where it really happened, so felt
     // and heard land together. 0 = off (old behaviour, felt trails heard).
     std::atomic<float> syncLookaheadMs{80.0f};
+    // takeOver: AVA carries the music (muted tap, music sends live, look-ahead
+    // on). Off = listen only: the music plays as it did, AVA adds vibration.
+    std::atomic<int>   takeOver{0};
+    // transport: 1 = the bed moves, 0 = paused (music is never affected)
+    std::atomic<int>   vibOn{1};
     // Lift: gentle upward expansion of the SPLIT layers — quiet sustained
     // instruments (strings, piano, pads) come up to be felt, loud passages
     // and transients are left alone. 0 = off, 1 = strong
@@ -81,7 +86,7 @@ struct Params {
     // per-zone levels; <0 means auto (computed from grounding/uplift)
     std::atomic<float> zoneLevel[NZONES]{{-1.f}, {-1.f}, {-1.f}, {-1.f}, {-1.f}};
     std::atomic<float> masterVolume{1.0f};
-    std::atomic<int>   monitorVibOnStereo{1};
+    std::atomic<int>   monitorVibOnStereo{0};
     // routing (0-based device channel indices)
     std::atomic<int>   musicChanL{0};        // music pair = L,L+1 (ch 1-2 main out); -1 = off
     std::atomic<float> musicGain{1.0f};      // music pair level ×0..1.5

@@ -191,7 +191,10 @@ void Engine::process(const float* inL, const float* inR, float** out, int n) {
     const float fxCoef = std::exp(-1.0f / (0.008f * kSR));
 
     // look-ahead for this block; detector latencies to back-date events by
-    look_ = std::min(kLookMax, std::max(0, (int)(params.syncLookaheadMs.load() * 0.001f * kSR)));
+    // listen mode cannot delay the music, so it must not delay the bed either
+    look_ = params.takeOver.load()
+        ? std::min(kLookMax, std::max(0, (int)(params.syncLookaheadMs.load() * 0.001f * kSR)))
+        : 0;
     const int look = look_;
     const long dThump = (long)(0.016f * kSR);   // band filter + attack, plus the
                                                  // 42 Hz thump's own rise through the 80 Hz lowpass

@@ -11,6 +11,13 @@ void mixOutputBlock(OutputUnit* self, Engine* eng, const float* L, const float* 
                     float* const* vib, const float* const* vibR, float* dst, int n, int ch) {
     float vol = eng->params.masterVolume.load();
     bool monitor = eng->params.monitorVibOnStereo.load() != 0;
+    // AVA plays the music only when it has taken it over (muted tap); in
+    // listen mode the music is already coming out of the speakers untouched
+    // (an authored stem set brings its own music track: that always plays)
+    const bool takeOver = (self->tapMutesSource && eng->params.takeOver.load() != 0)
+                          || (self->player && self->player->active());
+    // transport: paused = the bed is still, the music keeps playing
+    const float vibG = eng->params.vibOn.load() ? 1.0f : 0.0f;
 
     // Routing: music pair + surround pair + per-zone channels, all on the
     // chosen device. On a plain stereo device (≤2ch) fall back to a vibration
@@ -52,10 +59,10 @@ void mixOutputBlock(OutputUnit* self, Engine* eng, const float* L, const float* 
         // unity (already delayed by the sync look-ahead); the vibration bus
         // rides underneath as an audible monitor so the bed can be heard
         // pumping even without transducers.
-        float mg = self->tapMutesSource ? musicG : 0.0f;
+        float mg = takeOver ? musicG : 0.0f;
         for (int i = 0; i < n; i++) {
-            float v = monitor ? 0.7f * 0.5f * (vib[HEART][i] + vib[BELLY][i] +
-                                               vib[ROOT][i] + vib[FEET][i]) : 0.0f;
+            float v = monitor ? vibG * 0.7f * 0.5f * (vib[HEART][i] + vib[BELLY][i] +
+                                                      vib[ROOT][i] + vib[FEET][i]) : 0.0f;
             dst[i * ch] = vol * (mg * L[i] + v);
             if (ch > 1) dst[i * ch + 1] = vol * (mg * R[i] + v);
         }
@@ -77,11 +84,11 @@ void mixOutputBlock(OutputUnit* self, Engine* eng, const float* L, const float* 
     }
     for (int i = 0; i < n; i++) {
         float* f = dst + (size_t)i * ch;
-        if (musicL >= 0 && musicL < ch) {
+        if (takeOver && musicL >= 0 && musicL < ch) {
             f[musicL] += vol * musicG * L[i];
             if (musicL + 1 < ch) f[musicL + 1] += vol * musicG * R[i];
         }
-        if (surrL >= 0 && surrL < ch) {
+        if (takeOver && surrL >= 0 && surrL < ch) {
             // mid/side width control: 0 = mono fill, 1 = full stereo image
             float mid = 0.5f * (L[i] + R[i]);
             float side = 0.5f * (L[i] - R[i]) * surrW;
@@ -89,9 +96,9 @@ void mixOutputBlock(OutputUnit* self, Engine* eng, const float* L, const float* 
             if (surrL + 1 < ch) f[surrL + 1] += vol * surrG * (mid - side);
         }
         for (int z = 0; z < NZONES; z++) {
-            if (zc[z] >= 0 && zc[z] < ch) f[zc[z]] += vol * zt[z] * vib[z][i];
+            if (zc[z] >= 0 && zc[z] < ch) f[zc[z]] += vol * vibG * zt[z] * vib[z][i];
             // second send: the same signal, or in STEREO mode the right side
-            if (zc2[z] >= 0 && zc2[z] < ch) f[zc2[z]] += vol * zt[z] * (vR[z] ? vR[z][i] : vib[z][i]);
+            if (zc2[z] >= 0 && zc2[z] < ch) f[zc2[z]] += vol * vibG * zt[z] * (vR[z] ? vR[z][i] : vib[z][i]);
         }
     }
     // thermal guard on zone channels: integrate output power over ~45 s and,

@@ -74,7 +74,7 @@ bool SystemTap::start(StereoRing* ring) {
         // copy, which leaves the interface in the same render as the
         // vibration — felt and heard land together instead of the direct
         // playback arriving one buffer ahead of the bed.
-        desc.muteBehavior = CATapMutedWhenTapped;
+        desc.muteBehavior = muteSources ? CATapMutedWhenTapped : CATapUnmuted;
 
         AudioObjectID tapID = kAudioObjectUnknown;
         OSStatus err = AudioHardwareCreateProcessTap(desc, &tapID);

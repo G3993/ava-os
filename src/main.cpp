@@ -224,6 +224,16 @@ static void setInput(bool on) {
     } else fprintf(stderr, "[input] %s\n", gIn.lastError.c_str());
 }
 #endif
+// Listen (default) vs take over. Take over is the temple setup: the music
+// goes out through AVA's own music channels on the interface, in step with
+// the bed. Everyone else just listens: nothing about their sound changes.
+static bool gTakeOver = false;
+static void setTakeOver(bool on) {
+    gTakeOver = on;
+    gEngine.params.takeOver.store(on ? 1 : 0);
+    gTap.muteSources = on;
+    if (gTap.running() && gTapState.load() != 1) { gTap.stop(); startTapAsync(); }
+}
 static void startAudio() {
     if (!gTap.running()) startTapAsync();
     if (!gOut.running() && gSelDevice >= 0 && gSelDevice < (int)gDevices.size())
@@ -2517,6 +2527,15 @@ int main(int argc, char** argv) {
     if (const char* sh = getenv("AVA_SHADER")) { gShaders.loadLibrary(shaderLibraryDir()); gShaders.load(atoi(sh)); }
     signal(SIGTERM, onQuitSignal);
     signal(SIGINT, onQuitSignal);
+    // AVA only takes the music over when it otherwise would not reach the
+    // bed's interface: the interface is selected but the Mac is playing
+    // through something else. If the interface already is the Mac's output,
+    // or there is no interface, AVA just listens like a speaker would.
+    {
+        bool iface = gSelDevice >= 0 && gSelDevice < (int)gDevices.size() && gDevices[gSelDevice].channels >= 7;
+        bool ifaceIsDefault = iface && defaultOutputDevice() == gDevices[gSelDevice].id;
+        setTakeOver(iface && !ifaceIsDefault);
+    }
     startTapAsync();
     startAudio(); // live on launch
 #ifdef __APPLE__
@@ -2657,6 +2676,18 @@ int main(int argc, char** argv) {
                                 if (ImGui::SmallButton("Max")) maxDeviceHwVolume(gDevices[gSelDevice].id);
                             }
                         }
+                    }
+                    {
+                        bool to = gTakeOver;
+                        if (ImGui::Checkbox("AVA plays the music", &to)) setTakeOver(to);
+                        if (ImGui::IsItemHovered())
+                            ImGui::SetTooltip(to ? "On: other apps are silenced and AVA plays the music itself through its music\n"
+                                                   "channels, in step with the bed (the temple interface setup)."
+                                                 : "Off: AVA only listens. Your music plays exactly as before and AVA adds the bed.");
+                        ImGui::SameLine();
+                        if (gFontSmall) ImGui::PushFont(gFontSmall);
+                        ImGui::TextDisabled(to ? "speaker" : "listening");
+                        if (gFontSmall) ImGui::PopFont();
                     }
                     if (ImGui::SmallButton("Max every level")) maxAllLevels();
                     if (ImGui::IsItemHovered()) ImGui::SetTooltip("master, music, surround, every ring trim and the interface knob to full");
@@ -2920,7 +2951,7 @@ int main(int argc, char** argv) {
 
                 // ── music + surround on the selected device ──
                 ImGui::Separator();
-                ImGui::TextDisabled("MUSIC");
+                ImGui::TextDisabled(gTakeOver ? "MUSIC" : "MUSIC   ·   off while listening (Settings)");
                 pairRow("Music / Hi-Fi", "m", gEngine.params.musicChanL);
                 ImGui::Text("Level"); ImGui::SameLine(150);
                 gainSlider("##mg", gEngine.params.musicGain, 1.5f, "%.2f");
@@ -3067,11 +3098,15 @@ int main(int argc, char** argv) {
             // play/pause circle
             ImGui::SetCursorScreenPos(ImVec2(bx - 16, by - 16));
             if (ImGui::InvisibleButton("##play", ImVec2(32, 32))) {
-                if (gPlaying) stopAudio(); else startAudio();
+                // the bed, not the music: pause stills the vibration, the
+                // song keeps playing exactly as it was
+                if (!gOut.running()) startAudio();
+                gEngine.params.vibOn.store(gEngine.params.vibOn.load() ? 0 : 1);
             }
             bool hov = ImGui::IsItemHovered();
+            if (hov) ImGui::SetTooltip(gEngine.params.vibOn.load() ? "pause the bed (the music keeps playing)" : "play the bed");
             dl->AddCircleFilled(ImVec2(bx, by), 16, W(hov ? 0.95f : 0.9f));
-            if (gPlaying) {
+            if (gEngine.params.vibOn.load() && gOut.running()) {
                 dl->AddRectFilled(ImVec2(bx - 5.5f, by - 6), ImVec2(bx - 1.5f, by + 6), IM_COL32(10,10,10,255), 1);
                 dl->AddRectFilled(ImVec2(bx + 1.5f, by - 6), ImVec2(bx + 5.5f, by + 6), IM_COL32(10,10,10,255), 1);
             } else {
@@ -3079,7 +3114,12 @@ int main(int argc, char** argv) {
             }
             // stop square
             ImGui::SetCursorScreenPos(ImVec2(bx + 26, by - 10));
-            if (ImGui::InvisibleButton("##stop", ImVec2(20, 20))) stopAudio();
+            if (ImGui::InvisibleButton("##stop", ImVec2(20, 20))) {
+                gEngine.params.vibOn.store(0);
+                stopVfx();
+                for (int z = 0; z < NZONES; z++) { setDrone(z, false); gEngine.params.padGate[z].store(0); }
+            }
+            if (ImGui::IsItemHovered()) ImGui::SetTooltip("stop the bed and everything sounding on it");
             dl->AddRectFilled(ImVec2(bx + 29, by - 6), ImVec2(bx + 41, by + 6), W(ImGui::IsItemHovered() ? 0.9f : 0.6f), 2);
 
             // mini window toggle at the pill's right end
