@@ -64,6 +64,11 @@ public:
     std::atomic<float> chanThermGain[kMaxCh];
     float heatMs_[kMaxCh] = {0};
     float thermG_[kMaxCh] = {1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1};
+    // output peak limiter, every device channel, last thing before the DAC:
+    // instant attack to a 0.98 ceiling, 150 ms release. chanLimRed = gain
+    // reduction currently applied (0 = none, 0.5 = -6 dB) for the health monitor.
+    std::atomic<float> chanLimRed[kMaxCh] = {};
+    float limG_[kMaxCh] = {1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1};
 
 private:
     std::atomic<bool> running_{false};

@@ -22,12 +22,45 @@ static OSStatus inputCB(void* refCon, AudioUnitRenderActionFlags* flags,
     float g = self->gain.load();
     static thread_local std::vector<float> L, R;
     L.resize(nFrames); R.resize(nFrames);
-    float pk = 0;
+    // raw (post user gain, pre guard) peak decides the guard; the guard's
+    // trim is then applied with a ~50 ms slew so steps are inaudible
+    float pkRaw = 0;
     for (UInt32 i = 0; i < nFrames; i++) {
         float l = self->scratch_[i * ch + cl] * g, r = self->scratch_[i * ch + cr] * g;
         L[i] = l; R[i] = r;
-        pk = std::max(pk, std::max(std::fabs(l), std::fabs(r)));
+        pkRaw = std::max(pkRaw, std::max(std::fabs(l), std::fabs(r)));
     }
+    const float dt = nFrames / 48000.0f;
+    float clip = self->clipHold.load();
+    if (pkRaw > 0.97f) {
+        clip = 1.5f;
+        self->hotSec_ += dt;
+        self->coolSec_ = 0;
+        if (self->hotSec_ > 0.25f) {            // sustained full scale: clip or loop
+            self->hotSec_ = 0;
+            self->trimTarget_ = std::max(1.0f / 64.0f, self->trimTarget_ * 0.5f);
+        }
+    } else {
+        clip = std::max(0.0f, clip - dt);
+        self->hotSec_ = std::max(0.0f, self->hotSec_ - dt);
+        if (pkRaw < 0.5f) {
+            self->coolSec_ += dt;
+            if (self->coolSec_ > 4.0f && self->trimTarget_ < 1.0f) {   // quiet: ease back 1 dB
+                self->coolSec_ = 0;
+                self->trimTarget_ = std::min(1.0f, self->trimTarget_ * 1.122f);
+            }
+        } else self->coolSec_ = 0;
+    }
+    self->clipHold.store(clip);
+    const float aT = 1.0f / (0.05f * 48000.0f);
+    float t = self->trim_, pk = 0;
+    for (UInt32 i = 0; i < nFrames; i++) {
+        t += (self->trimTarget_ - t) * aT;
+        L[i] *= t; R[i] *= t;
+        pk = std::max(pk, std::max(std::fabs(L[i]), std::fabs(R[i])));
+    }
+    self->trim_ = t;
+    self->autoTrim.store(t);
     float prev = self->peak.load() * 0.9f;
     self->peak.store(pk > prev ? pk : prev);
     self->ring()->pushPlanar(L.data(), R.data(), (int)nFrames);

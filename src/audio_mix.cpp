@@ -122,5 +122,25 @@ void mixOutputBlock(OutputUnit* self, Engine* eng, const float* L, const float* 
             self->pingChan.store(-1, std::memory_order_relaxed);
         }
     }
+    // peak limiter on every device channel: whatever stacked up above (hot
+    // music send, six zone normaliser gain, pads on top of the chain, a
+    // feedback loop through the interface) leaves here below full scale
+    {
+        const float ceil = 0.98f;
+        const float aRel = 1.0f / (0.15f * 48000.0f);
+        for (int c = 0; c < ch && c < OutputUnit::kMaxCh; c++) {
+            float g = self->limG_[c], minG = 1.0f;
+            for (int i = 0; i < n; i++) {
+                float& v = dst[(size_t)i * ch + c];
+                float a = std::fabs(v);
+                float tg = a > ceil ? ceil / a : 1.0f;
+                if (tg < g) g = tg; else g += (1.0f - g) * aRel;
+                v *= g;
+                if (g < minG) minG = g;
+            }
+            self->limG_[c] = g;
+            self->chanLimRed[c].store(1.0f - minG, std::memory_order_relaxed);
+        }
+    }
     captureMeters();
 }

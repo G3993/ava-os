@@ -2317,7 +2317,15 @@ int main(int argc, char** argv) {
                         float heat = gOut.chanHeat[c].load();
                         float tg = gOut.chanThermGain[c].load();
                         ImGui::SameLine(388);
-                        if (heat > 0.001f) {
+                        float lim = gOut.chanLimRed[c].load();
+                        if (lim > 0.02f) {
+                            // limiter working: the channel was asked for more than full scale
+                            ImGui::TextColored(ImVec4(1, 0.45f, 0.35f, 1), "LIM %.0f dB",
+                                               20.0f * log10f(std::max(0.01f, 1.0f - lim)));
+                            if (ImGui::IsItemHovered())
+                                ImGui::SetTooltip("Output limiter engaged on this channel: the mix asked for\n"
+                                                  "more than full scale. Lower the send / trim feeding it.");
+                        } else if (heat > 0.001f) {
                             ImVec4 col = tg < 0.98f ? ImVec4(1, 0.35f, 0.3f, 1)
                                        : heat > 0.7f ? ImVec4(1, 0.75f, 0.3f, 1)
                                                      : ImVec4(1, 1, 1, 0.45f);
@@ -2595,6 +2603,23 @@ int main(int argc, char** argv) {
                             ImGui::GetWindowDrawList()->AddRectFilled(ImVec2(mp.x, mp.y + 6), ImVec2(mp.x + 80 * std::min(1.0f, pk), mp.y + 14),
                                                                       pk > 0.98f ? IM_COL32(255, 120, 90, 255) : IM_COL32(140, 235, 255, 230), 3);
                         ImGui::Dummy(ImVec2(84, 0));
+                        {
+                            float trim = gIn.autoTrim.load();
+                            bool clip = gIn.clipHold.load() > 0.0f;
+                            if (trim < 0.99f) {
+                                ImGui::SameLine();
+                                ImGui::TextColored(ImVec4(1, 0.55f, 0.3f, 1), "GUARD %.0f dB", 20.0f * log10f(trim));
+                                if (ImGui::IsItemHovered())
+                                    ImGui::SetTooltip("The input sat at full scale, so it was pulled down.\n"
+                                                      "Either the source is too hot for the interface, or the\n"
+                                                      "interface's outputs are coming back into its inputs\n"
+                                                      "(feedback). Turn the source / interface gain down, or\n"
+                                                      "break the loop; the guard eases back up on its own.");
+                            } else if (clip) {
+                                ImGui::SameLine();
+                                ImGui::TextColored(ImVec4(1, 0.45f, 0.35f, 1), "CLIP");
+                            }
+                        }
                         ImGui::TextDisabled("inputs 1-%d on %s  ·  same L and R = mono", nin, gDevices[gSelDevice].name.c_str());
                         bool hear = gOut.inToSpeakers.load();
                         if (ImGui::Checkbox("Also play the input on the speaker outputs", &hear)) gOut.inToSpeakers.store(hear);
@@ -2910,6 +2935,23 @@ int main(int argc, char** argv) {
                     if (gFontSmall) ImGui::PopFont();
                 }
             }
+#ifdef __APPLE__
+            // live-input guard / clip flag: the one thing worth shouting about
+            // up here, because it means the felt output is being protected
+            if (gInOn && gIn.running()) {
+                float trim = gIn.autoTrim.load();
+                bool clip = gIn.clipHold.load() > 0.0f;
+                if (trim < 0.99f || clip) {
+                    char tag[40];
+                    if (trim < 0.99f) snprintf(tag, sizeof tag, "IN GUARD %.0f dB", 20.0f * log10f(trim));
+                    else snprintf(tag, sizeof tag, "IN CLIP");
+                    if (gFontSmall) ImGui::PushFont(gFontSmall);
+                    ImVec2 ts = ImGui::CalcTextSize(tag);
+                    dl->AddText(ImVec2(leftW - 160 - ts.x, 42 - ts.y / 2), IM_COL32(255, 140, 80, 255), tag);
+                    if (gFontSmall) ImGui::PopFont();
+                }
+            }
+#endif
             {
                 bool signal = gTap.running() && gTap.inputPeak.load() > 0.003f;
                 ImVec2 dp(leftW - 100, 42);
