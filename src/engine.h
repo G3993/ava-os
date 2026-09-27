@@ -86,7 +86,7 @@ struct Params {
     // per-zone levels; <0 means auto (computed from grounding/uplift)
     std::atomic<float> zoneLevel[NZONES]{{-1.f}, {-1.f}, {-1.f}, {-1.f}, {-1.f}};
     std::atomic<float> masterVolume{1.0f};
-    std::atomic<int>   monitorVibOnStereo{0};
+    std::atomic<int>   monitorVibOnStereo{1};
     // routing (0-based device channel indices)
     std::atomic<int>   musicChanL{0};        // music pair = L,L+1 (ch 1-2 main out); -1 = off
     std::atomic<float> musicGain{1.0f};      // music pair level ×0..1.5

@@ -61,8 +61,11 @@ void mixOutputBlock(OutputUnit* self, Engine* eng, const float* L, const float* 
         // pumping even without transducers.
         float mg = takeOver ? musicG : 0.0f;
         for (int i = 0; i < n; i++) {
-            float v = monitor ? vibG * 0.7f * 0.5f * (vib[HEART][i] + vib[BELLY][i] +
-                                                      vib[ROOT][i] + vib[FEET][i]) : 0.0f;
+            // audible bed on small speakers: the rings live at 10-80 Hz, which
+            // a laptop cannot reproduce, so the monitor is gently saturated —
+            // the harmonics (80-240 Hz) carry the same rhythm where you can hear it
+            float m = 0.5f * (vib[HEART][i] + vib[BELLY][i] + vib[ROOT][i] + vib[FEET][i]);
+            float v = monitor ? vibG * 0.8f * std::tanh(2.2f * m) : 0.0f;
             dst[i * ch] = vol * (mg * L[i] + v);
             if (ch > 1) dst[i * ch + 1] = vol * (mg * R[i] + v);
         }

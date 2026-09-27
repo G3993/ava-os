@@ -2596,6 +2596,28 @@ int main(int argc, char** argv) {
             if (gSweepZone >= NZONES) gSweepZone = -1;
             else fireZonePulse(gSweepZone);
         }
+        // hot-plug: if the bed's interface appears while we are on a stereo
+        // device (it was plugged in after launch), move to it — otherwise the
+        // bed silently never moves and the music plays from the laptop
+        {
+            static double tScan = 0;
+            double tnow = glfwGetTime();
+            bool onStereo = gSelDevice < 0 || gSelDevice >= (int)gDevices.size() || gDevices[gSelDevice].channels < 7;
+            if (onStereo && tnow - tScan > 3.0) {
+                tScan = tnow;
+                auto devs = listOutputDevices();
+                for (int i = 0; i < (int)devs.size(); i++)
+                    if (devs[i].channels >= 7) {
+                        gDevices = devs;
+                        gSelDevice = i;
+                        fprintf(stderr, "[output] interface appeared: %s — switching\n", devs[i].name.c_str());
+                        stopAudio();
+                        setTakeOver(defaultOutputDevice() != devs[i].id);
+                        startAudio();
+                        break;
+                    }
+            }
+        }
         // remember when each interface channel last carried real signal
         {
             double tnow = glfwGetTime();
