@@ -87,11 +87,13 @@ if(APPLE)
     COMMAND ${CMAKE_COMMAND} -E copy_directory
       "${CMAKE_SOURCE_DIR}/shaders" "$<TARGET_BUNDLE_CONTENT_DIR:AVAOS>/Resources/shaders")
 elseif(WIN32)
+  enable_language(RC)
   add_executable(AVAOS
     ${AVA_COMMON_SRC}
     src/file_dialog_win.cpp
     src/audio_win.cpp
-    src/glplat_win.cpp)
+    src/glplat_win.cpp
+    assets/ava.rc)   # exe icon (assets/ava.ico)
   # GL declarations come from src/glplat.h, not the system header
   target_compile_definitions(AVAOS PRIVATE GLFW_INCLUDE_NONE NOMINMAX)
   target_include_directories(AVAOS PRIVATE ${miniaudio_SOURCE_DIR})
