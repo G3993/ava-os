@@ -238,6 +238,10 @@ public:
     std::atomic<float> meter[NZONES + 2];   // 0..1 L,R then zones
     std::atomic<float> zoneHz[NZONES];      // live per-zone carrier Hz
     float scope[kScopeLen] = {0};           // mono input waveform (UI reads raw)
+    // vectorscope: the last kVecLen stereo samples at full rate (~21 ms)
+    static constexpr int kVecLen = 1024;
+    float vecL[kVecLen] = {0}, vecR[kVecLen] = {0};
+    std::atomic<int> vecW{0};
     float vibScope[NZONES][kScopeLen] = {{0}}; // per-zone output traces
     std::atomic<int> scopeW{0};
 

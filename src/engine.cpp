@@ -241,6 +241,12 @@ void Engine::process(const float* inL, const float* inR, float** out, int n) {
         anaPos_++;
         const long synthPos = anaPos_ - look;
 
+        // vectorscope history (every sample, cheap)
+        {
+            int vi = vecW.load(std::memory_order_relaxed);
+            vecL[vi] = inL[i]; vecR[vi] = inR[i];
+            vecW.store((vi + 1) % kVecLen, std::memory_order_relaxed);
+        }
         // scope for UI
         bool doScope = false;
         int scopeIdx = 0;

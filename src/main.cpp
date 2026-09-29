@@ -1865,10 +1865,41 @@ static void drawWaveBody(float w) {
     // ── MASTER · Input ──
     {
         label("MASTER   ·   Input", y);
-        float hh = 84, top = y + 18;
+        float hh = 120, top = y + 18;
+        const float vs = hh;                       // vectorscope square on the right
+        float wx1 = o.x + w - vs - 10;             // wave ends where the scope begins
         dl->AddRectFilled(ImVec2(o.x, top), ImVec2(o.x + w, top + hh), IM_COL32(8, 8, 9, 255), 12);
-        dl->AddLine(ImVec2(o.x + 12, top + hh / 2), ImVec2(o.x + w - 12, top + hh / 2), W(0.06f), 1);
-        trace(gEngine.scope, o.x + 12, o.x + w - 12, top + hh / 2, hh * 0.42f, gScopeGain, W(0.22f), W(0.92f));
+        dl->AddLine(ImVec2(o.x + 12, top + hh / 2), ImVec2(wx1 - 8, top + hh / 2), W(0.06f), 1);
+        trace(gEngine.scope, o.x + 12, wx1 - 8, top + hh / 2, hh * 0.40f, gScopeGain, W(0.22f), W(0.92f));
+        // ── vectorscope: L against R, turned 45° so mono is a vertical line,
+        //    width opens it into a cloud; the last ~21 ms of samples ──
+        {
+            ImVec2 c(o.x + w - vs / 2, top + hh / 2);
+            float r = vs * 0.42f;
+            dl->AddLine(ImVec2(c.x, c.y - r), ImVec2(c.x, c.y + r), W(0.10f), 1);
+            dl->AddLine(ImVec2(c.x - r, c.y), ImVec2(c.x + r, c.y), W(0.10f), 1);
+            dl->AddLine(ImVec2(c.x - r * 0.707f, c.y - r * 0.707f), ImVec2(c.x + r * 0.707f, c.y + r * 0.707f), W(0.06f), 1);
+            dl->AddLine(ImVec2(c.x - r * 0.707f, c.y + r * 0.707f), ImVec2(c.x + r * 0.707f, c.y - r * 0.707f), W(0.06f), 1);
+            dl->AddCircle(c, r, W(0.10f), 48, 1.0f);
+            int vw = gEngine.vecW.load(std::memory_order_relaxed);
+            const int VN = Engine::kVecLen;
+            static ImVec2 vp[Engine::kVecLen];
+            float g = gScopeGain * 1.4f;
+            for (int i = 0; i < VN; i++) {
+                int k = (vw + i) % VN;
+                float l = gEngine.vecL[k] * g, rr = gEngine.vecR[k] * g;
+                float x = (l - rr) * 0.707f, yv = (l + rr) * 0.707f;
+                float m = std::sqrt(x * x + yv * yv);
+                if (m > 1.0f) { x /= m; yv /= m; }
+                vp[i] = ImVec2(c.x + x * r, c.y - yv * r);
+            }
+            dl->AddPolyline(vp, VN, W(0.10f), 0, 2.5f);
+            dl->AddPolyline(vp, VN, W(0.55f), 0, 1.0f);
+            if (gFontSmall) ImGui::PushFont(gFontSmall);
+            dl->AddText(ImVec2(c.x - r - 2, c.y + r - 4), W(0.25f), "L");
+            dl->AddText(ImVec2(c.x + r - 6, c.y + r - 4), W(0.25f), "R");
+            if (gFontSmall) ImGui::PopFont();
+        }
         y = top + hh + 18;
     }
     // ── RINGS · Output, with zoom and gain on the right of the header ──
@@ -2861,26 +2892,6 @@ int main(int argc, char** argv) {
         dl->AddCircleFilled(ImVec2(42, 40), 10, W(0.18f));
         dl->AddCircleFilled(ImVec2(42, 40), 6, W(0.95f));
         dl->AddText(ImVec2(60, 32), W(0.95f), "AVA OS");
-        // global channel mode — MONO · STEREO · SURROUND — lives up here so it
-        // is reachable from Audio, Visual and Artifact alike
-        {
-            static const char* gm[3] = {"MONO", "STEREO", "SURROUND"};
-            static const int gmMode[3] = {2, 3, 4};
-            int em = gEngine.params.engineMode.load();
-            float x = 190;
-            if (gFontSmall) ImGui::PushFont(gFontSmall);
-            for (int i = 0; i < 3; i++) {
-                ImVec2 ts = ImGui::CalcTextSize(gm[i]);
-                ImGui::SetCursorScreenPos(ImVec2(x - 6, 30));
-                char id[16]; snprintf(id, sizeof id, "##gm%d", i);
-                if (ImGui::InvisibleButton(id, ImVec2(ts.x + 12, 24))) gEngine.params.engineMode.store(gmMode[i]);
-                bool on = em == gmMode[i], hov = ImGui::IsItemHovered();
-                dl->AddText(ImVec2(x, 42 - ts.y / 2), W(on ? 0.95f : (hov ? 0.7f : 0.35f)), gm[i]);
-                if (on) dl->AddLine(ImVec2(x, 42 + ts.y / 2 + 3), ImVec2(x + ts.x, 42 + ts.y / 2 + 3), W(0.9f), 1.5f);
-                x += ts.x + 22;
-            }
-            if (gFontSmall) ImGui::PopFont();
-        }
 
         if (gShowHealth) {
             double tnow = glfwGetTime();
@@ -3149,19 +3160,13 @@ int main(int argc, char** argv) {
 
         // ── transport pill under octagon ──
         {
-            float pw = 470, ph = 56;
+            float pw = std::min(780.0f, leftW - 40.0f), ph = 56;
             ImVec2 p0(octC.x - pw / 2, H_ - ph - 26), p1(octC.x + pw / 2, H_ - 26);
             dl->AddRectFilled(p0, p1, IM_COL32(18, 18, 20, 235), ph / 2);
             dl->AddRect(p0, p1, W(0.08f), ph / 2);
 
-            // waveform glyph
-            float gx = p0.x + 30, gy = p0.y + ph / 2;
-            for (int i = 0; i < 5; i++) {
-                float hh = (i == 2 ? 10.f : (i == 1 || i == 3) ? 7.f : 4.f);
-                dl->AddRectFilled(ImVec2(gx + i * 5, gy - hh), ImVec2(gx + i * 5 + 2.5f, gy + hh), W(0.85f), 1);
-            }
             // Output (device select)
-            ImGui::SetCursorScreenPos(ImVec2(gx + 34, p0.y + 14));
+            ImGui::SetCursorScreenPos(ImVec2(p0.x + 24, p0.y + 14));
             std::string devLabel = "Output";
             if (ImGui::Button(devLabel.c_str(), ImVec2(86, 28))) ImGui::OpenPopup("##devices");
             if (ImGui::BeginPopup("##devices")) {
@@ -3354,8 +3359,35 @@ int main(int argc, char** argv) {
                 ImGui::EndPopup();
             }
 
+            // engine mode, right after Output: SYNTH · SPLIT · MONO · STEREO · SURROUND
+            float modesEnd = p0.x + 24 + 86 + 20;
+            {
+                static const char* modes[5] = {"SYNTH", "SPLIT", "MONO", "STEREO", "SURROUND"};
+                static const char* modeTips[5] = {
+                    "SYNTH: one root note, five mixes of it. The original engine.",
+                    "SPLIT: feet = sub, root = bass line, belly = drums,\nheart = vocal/chord melody, head = lead/air melody. Five layers at once.",
+                    "MONO: the song itself, felt. Its low end to every zone,\nbass exaggerated x2, plus an octave-down copy of bass the rings can't move.",
+                    "STEREO: MONO split left / right. Send 1 = left side, send 2 = right side\nof each ring (low-end width x2); the feet stay mono.",
+                    "SURROUND: 3 channels. Head+heart = the voice, belly+root = bass line + drums,\nfeet = LFE sub (+10 dB). A head-to-toe roll fires only on a clear bass drop."};
+                int em = gEngine.params.engineMode.load();
+                float x = modesEnd, cy = p0.y + ph / 2;
+                if (gFontSmall) ImGui::PushFont(gFontSmall);
+                for (int m = 0; m < 5; m++) {
+                    ImVec2 ts = ImGui::CalcTextSize(modes[m]);
+                    ImGui::SetCursorScreenPos(ImVec2(x - 5, cy - 12));
+                    char id[16]; snprintf(id, sizeof(id), "##em%d", m);
+                    if (ImGui::InvisibleButton(id, ImVec2(ts.x + 10, 24))) gEngine.params.engineMode.store(m);
+                    bool on = em == m, hov = ImGui::IsItemHovered();
+                    if (hov) ImGui::SetTooltip("%s", modeTips[m]);
+                    dl->AddText(ImVec2(x, cy - ts.y / 2), W(on ? 0.95f : (hov ? 0.7f : 0.35f)), modes[m]);
+                    if (on) dl->AddLine(ImVec2(x, cy + ts.y / 2 + 3), ImVec2(x + ts.x, cy + ts.y / 2 + 3), W(0.9f), 1.5f);
+                    x += ts.x + 14;
+                }
+                if (gFontSmall) ImGui::PopFont();
+                modesEnd = x;
+            }
             // transport buttons
-            float bx = p0.x + 210, by = p0.y + ph / 2;
+            float bx = modesEnd + 26, by = p0.y + ph / 2;
             // play/pause circle
             ImGui::SetCursorScreenPos(ImVec2(bx - 16, by - 16));
             if (ImGui::InvisibleButton("##play", ImVec2(32, 32))) {
@@ -3507,32 +3539,6 @@ int main(int argc, char** argv) {
             if (gFontSmall) ImGui::PushFont(gFontSmall);
             dl->AddText(ImVec2(mx + 84, my + 14), W(0.32f), info);
             if (gFontSmall) ImGui::PopFont();
-            // engine mode: BODY (one root, five mixes) vs SPLIT (five layers of the song)
-            {
-                static const char* modes[5] = {"SYNTH", "SPLIT", "MONO", "STEREO", "SURROUND"};
-                static const char* modeTips[5] = {
-                    "SYNTH: one root note, five mixes of it. The original engine.",
-                    "SPLIT: feet = sub, root = bass line, belly = drums,\nheart = vocal/chord melody, head = lead/air melody. Five layers at once.",
-                    "MONO: the song itself, felt. Its low end to every zone,\nbass exaggerated x2, plus an octave-down copy of bass the rings can't move.",
-                    "STEREO: MONO split left / right. Send 1 = left side, send 2 = right side\nof each ring (low-end width x2); the feet stay mono.",
-                    "SURROUND: 3 channels. Head+heart = the voice, belly+root = bass line + drums,\nfeet = LFE sub (+10 dB). A head-to-toe roll fires only on a clear bass drop."};
-                int em = gEngine.params.engineMode.load();
-                float x = mx + mw - 16;
-                for (int m = 4; m >= 0; m--) {
-                    ImVec2 ts = ImGui::CalcTextSize(modes[m]);
-                    x -= ts.x;
-                    ImGui::SetCursorScreenPos(ImVec2(x - 6, my + 8));
-                    char id[16]; snprintf(id, sizeof(id), "##em%d", m);
-                    if (ImGui::InvisibleButton(id, ImVec2(ts.x + 12, 22))) gEngine.params.engineMode.store(m);
-                    bool on = em == m;
-                    if (ImGui::IsItemHovered()) ImGui::SetTooltip("%s", modeTips[m]);
-                    dl->AddText(ImVec2(x, my + 12), W(on ? 0.92f : (ImGui::IsItemHovered() ? 0.6f : 0.3f)), modes[m]);
-                    if (on) dl->AddLine(ImVec2(x, my + 30), ImVec2(x + ts.x, my + 30), W(0.9f), 1.5f);
-                    x -= 14;
-                }
-            }
-
-
             // five zone frequency lines — one string per zone, endpoints
             // stacked at each side (HEAD top → FEET bottom); each line's wave
             // count follows the zone's live carrier Hz, amplitude and glow
