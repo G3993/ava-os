@@ -1833,6 +1833,7 @@ static float drawShaderPreviewCentered(ImDrawList* dl, ImVec2 o, float w, float 
 // ── WAVE: MASTER (input) and the five rings (output) as scopes ──
 static float gScopeZoom = 1.5f;   // 1 = the whole 340 ms buffer, 8 = the last ~40 ms
 static float gScopeGain = 1.0f;
+static bool gVecBig = false;      // vectorscope: small beside the wave, or large
 static void drawWaveBody(float w) {
     ImDrawList* dl = ImGui::GetWindowDrawList();
     ImVec2 o = ImGui::GetCursorScreenPos();
@@ -1865,23 +1866,29 @@ static void drawWaveBody(float w) {
     // ── MASTER · Input ──
     {
         label("MASTER   ·   Input", y);
-        float hh = 150, top = y + 18;
-        const float vs = hh;                       // vectorscope square on the right
-        float wx1 = o.x + w - vs - 10;             // wave ends where the scope begins
+        float hh = gVecBig ? std::min(w * 0.6f, 330.0f) : 150.0f, top = y + 18;
+        const float vs = hh;                       // vectorscope square on the left
+        float wx0 = o.x + vs + 10;                 // wave starts where the scope ends
         dl->AddRectFilled(ImVec2(o.x, top), ImVec2(o.x + w, top + hh), IM_COL32(8, 8, 9, 255), 12);
-        dl->AddLine(ImVec2(o.x + 12, top + hh / 2), ImVec2(wx1 - 8, top + hh / 2), W(0.06f), 1);
+        dl->AddLine(ImVec2(wx0 + 8, top + hh / 2), ImVec2(o.x + w - 12, top + hh / 2), W(0.06f), 1);
         {
             // auto-scale the input like the rings, so a quiet song still draws a wave
             float pk = 1e-3f;
             for (int i = 0; i < span; i++) pk = std::max(pk, std::fabs(gEngine.scope[(first + i) % N]));
             float g = gScopeGain * 0.9f / std::max(pk, 0.02f);
-            trace(gEngine.scope, o.x + 12, wx1 - 8, top + hh / 2, hh * 0.42f, g, W(0.25f), W(0.95f));
+            trace(gEngine.scope, wx0 + 8, o.x + w - 12, top + hh / 2, hh * 0.42f, g, W(0.25f), W(0.95f));
         }
         // ── vectorscope: L against R, turned 45° so mono is a vertical line,
         //    width opens it into a cloud; the last ~21 ms of samples ──
         {
-            ImVec2 c(o.x + w - vs / 2, top + hh / 2);
+            ImVec2 c(o.x + vs / 2, top + hh / 2);
             float r = vs * 0.42f;
+            // click the scope to grow / shrink it
+            ImGui::SetCursorScreenPos(ImVec2(c.x - r, c.y - r));
+            if (ImGui::InvisibleButton("##vecsize", ImVec2(2 * r, 2 * r))) gVecBig = !gVecBig;
+            bool vh = ImGui::IsItemHovered();
+            if (vh) { ImGui::SetTooltip(gVecBig ? "click: smaller" : "click: bigger"); ImGui::SetMouseCursor(ImGuiMouseCursor_Hand); }
+            if (vh) dl->AddCircleFilled(c, r, W(0.03f), 48);
             dl->AddLine(ImVec2(c.x, c.y - r), ImVec2(c.x, c.y + r), W(0.10f), 1);
             dl->AddLine(ImVec2(c.x - r, c.y), ImVec2(c.x + r, c.y), W(0.10f), 1);
             dl->AddLine(ImVec2(c.x - r * 0.707f, c.y - r * 0.707f), ImVec2(c.x + r * 0.707f, c.y + r * 0.707f), W(0.06f), 1);
