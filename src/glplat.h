@@ -39,6 +39,9 @@ typedef ptrdiff_t GLsizeiptr;
 #define GL_LINEAR 0x2601
 #define GL_CLAMP_TO_EDGE 0x812F
 #define GL_RGBA 0x1908
+#define GL_RGB               0x1907
+#define GL_PACK_ALIGNMENT    0x0D05
+#define GL_UNPACK_ALIGNMENT  0x0CF5
 #define GL_RGBA8 0x8058
 #define GL_RED 0x1903
 #define GL_R8 0x8229
@@ -95,6 +98,8 @@ typedef ptrdiff_t GLsizeiptr;
       (GLenum, GLint, GLint, GLsizei, GLsizei, GLint, GLenum, GLenum,          \
        const GLvoid*))                                                         \
     X(void, glTexParameteri, (GLenum, GLenum, GLint))                          \
+    X(void, glReadPixels, (GLint, GLint, GLsizei, GLsizei, GLenum, GLenum, void*)) \
+    X(void, glPixelStorei, (GLenum, GLint))                                     \
     X(void, glTexSubImage2D,                                                   \
       (GLenum, GLint, GLint, GLint, GLsizei, GLsizei, GLenum, GLenum,          \
        const GLvoid*))                                                         \

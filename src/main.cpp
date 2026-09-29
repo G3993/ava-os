@@ -8,6 +8,8 @@
 #include <cmath>
 #include <string>
 #include <vector>
+#include <set>
+#include <unordered_map>
 #include <algorithm>
 #include <thread>
 #include <chrono>
@@ -1794,7 +1796,43 @@ static void drawMiniFrame(GLFWwindow* win, ImDrawList* dl, ImGuiViewport* vp) {
     }
 }
 
-// ── WAVE: the master wave coming in, the five rings going out, the shader ──
+// ── deleted shaders: hidden from the browser, remembered across launches ──
+static std::set<int> gDeletedShaders;
+static std::string appSupportFile(const char* name) {
+#ifdef _WIN32
+    return name;
+#else
+    const char* home = getenv("HOME");
+    std::string dir = std::string(home ? home : ".") + "/Library/Application Support/AVA OS";
+    mkdir(dir.c_str(), 0755);
+    return dir + "/" + name;
+#endif
+}
+static void loadDeletedShaders() {
+    gDeletedShaders.clear();
+    if (FILE* f = fopen(appSupportFile("deleted_shaders.txt").c_str(), "r")) {
+        int id;
+        while (fscanf(f, "%d", &id) == 1) gDeletedShaders.insert(id);
+        fclose(f);
+    }
+}
+static void saveDeletedShaders() {
+    if (FILE* f = fopen(appSupportFile("deleted_shaders.txt").c_str(), "w")) {
+        for (int id : gDeletedShaders) fprintf(f, "%d\n", id);
+        fclose(f);
+    }
+}
+
+// the shader preview, centred in the column
+static float drawShaderPreviewCentered(ImDrawList* dl, ImVec2 o, float w, float y, float maxW = 320.0f) {
+    float pw = std::min(w, maxW);
+    drawShaderPreview(dl, ImVec2(o.x + (w - pw) / 2, y), pw);
+    return pw * 9.0f / 16.0f;
+}
+
+// ── WAVE: MASTER (input) and the five rings (output) as scopes ──
+static float gScopeZoom = 2.0f;   // 1 = the whole 2.7 s buffer, 8 = the last third of a second
+static float gScopeGain = 1.0f;
 static void drawWaveBody(float w) {
     ImDrawList* dl = ImGui::GetWindowDrawList();
     ImVec2 o = ImGui::GetCursorScreenPos();
@@ -1804,179 +1842,344 @@ static void drawWaveBody(float w) {
         dl->AddText(ImVec2(o.x, yy), W(a), t);
         if (gFontSmall) ImGui::PopFont();
     };
-    // scope snapshot: newest sample is just behind the write index
     int wi = gEngine.scopeW.load(std::memory_order_relaxed);
     const int N = Engine::kScopeLen;
-    // master wave
+    // how much of the buffer is on screen: the newest `span` samples
+    int span = std::max(64, (int)(N / gScopeZoom));
+    int first = (wi - span + N) % N;
+    // a 3-tap smooth so the traces read as waves, not needles
+    auto sampleAt = [&](const float* buf, int i) {
+        int a = (first + i - 1 + N) % N, b = (first + i) % N, c = (first + i + 1) % N;
+        return 0.25f * buf[a] + 0.5f * buf[b] + 0.25f * buf[c];
+    };
+    static ImVec2 pts[Engine::kScopeLen];
+    auto trace = [&](const float* buf, float x0, float x1, float mid, float amp, float gain, ImU32 glow, ImU32 line) {
+        int P = std::min(span, N);
+        for (int i = 0; i < P; i++) {
+            float v = sampleAt(buf, i) * gain;
+            pts[i] = ImVec2(x0 + (x1 - x0) * i / (float)(P - 1), mid - amp * std::max(-1.0f, std::min(1.0f, v)));
+        }
+        dl->AddPolyline(pts, P, glow, 0, 3.0f);
+        dl->AddPolyline(pts, P, line, 0, 1.2f);
+    };
+    // ── MASTER · Input ──
     {
-        label("MASTER   ·   what is coming in", y);
+        label("MASTER   ·   Input", y);
         float hh = 84, top = y + 18;
         dl->AddRectFilled(ImVec2(o.x, top), ImVec2(o.x + w, top + hh), IM_COL32(8, 8, 9, 255), 12);
         dl->AddLine(ImVec2(o.x + 12, top + hh / 2), ImVec2(o.x + w - 12, top + hh / 2), W(0.06f), 1);
-        static ImVec2 pts[Engine::kScopeLen];
-        float mid = top + hh / 2, amp = hh * 0.46f;
-        for (int i = 0; i < N; i++) {
-            float v = gEngine.scope[(wi + i) % N];
-            pts[i] = ImVec2(o.x + 12 + (w - 24) * i / (float)(N - 1), mid - amp * std::max(-1.0f, std::min(1.0f, v)));
-        }
-        dl->AddPolyline(pts, N, W(0.22f), 0, 3.0f);
-        dl->AddPolyline(pts, N, W(0.92f), 0, 1.2f);
-        y = top + hh + 16;
+        trace(gEngine.scope, o.x + 12, o.x + w - 12, top + hh / 2, hh * 0.42f, gScopeGain, W(0.22f), W(0.92f));
+        y = top + hh + 18;
     }
-    // five rings: one lane each, HEAD at the top, FEET at the bottom
+    // ── RINGS · Output, with zoom and gain on the right of the header ──
     {
-        label("RINGS   ·   what the bed is doing", y);
-        float lane = 46, top = y + 18;
-        static ImVec2 pts[Engine::kScopeLen];
+        label("RINGS   ·   Output", y);
+        if (gFontSmall) ImGui::PushFont(gFontSmall);
+        ImGui::SetCursorScreenPos(ImVec2(o.x + w - 250, y - 4));
+        ImGui::SetNextItemWidth(118);
+        ImGui::SliderFloat("##zoom", &gScopeZoom, 1.0f, 8.0f, "zoom %.1fx");
+        ImGui::SameLine(0, 8);
+        ImGui::SetNextItemWidth(118);
+        ImGui::SliderFloat("##gain", &gScopeGain, 0.25f, 4.0f, "gain %.2fx");
+        if (gFontSmall) ImGui::PopFont();
+        const float lane = 44, laneGap = 8, top = y + 22;
         for (int z = 0; z < NZONES; z++) {
-            float ly = top + z * lane, mid = ly + lane / 2, amp = lane * 0.44f;
+            float ly = top + z * (lane + laneGap), mid = ly + lane / 2, amp = lane * 0.40f;
             float lvl = gEngine.meter[2 + z].load();
-            dl->AddRectFilled(ImVec2(o.x, ly + 2), ImVec2(o.x + w, ly + lane - 2), IM_COL32(8, 8, 9, 255), 10);
-            dl->AddLine(ImVec2(o.x + 64, mid), ImVec2(o.x + w - 12, mid), W(0.05f), 1);
-            float gain = 1.0f / std::max(0.12f, lvl);   // auto-scale, like a scope's AUTO
-            for (int i = 0; i < N; i++) {
-                float v = gEngine.vibScope[z][(wi + i) % N] * gain;
-                pts[i] = ImVec2(o.x + 64 + (w - 76) * i / (float)(N - 1), mid - amp * std::max(-1.0f, std::min(1.0f, v)));
-            }
-            dl->AddPolyline(pts, N, W(0.10f + 0.25f * lvl), 0, 3.0f);
-            dl->AddPolyline(pts, N, W(0.45f + 0.5f * lvl), 0, 1.2f);
+            dl->AddRectFilled(ImVec2(o.x, ly), ImVec2(o.x + w, ly + lane), IM_COL32(8, 8, 9, 255), 10);
+            dl->AddLine(ImVec2(o.x + 72, mid), ImVec2(o.x + w - 12, mid), W(0.05f), 1);
+            // gentle auto-scale (never more than 3x) so quiet rings still read
+            float gain = gScopeGain * std::min(3.0f, 1.0f / std::max(0.3f, lvl));
+            trace(gEngine.vibScope[z], o.x + 72, o.x + w - 12, mid, amp, gain, W(0.08f + 0.2f * lvl), W(0.45f + 0.5f * lvl));
             if (gFontSmall) ImGui::PushFont(gFontSmall);
             dl->AddText(ImVec2(o.x + 12, mid - 13), W(0.75f), kZoneNames[z]);
             char hz[16]; snprintf(hz, sizeof hz, "%.0f Hz", gEngine.zoneHz[z].load());
             dl->AddText(ImVec2(o.x + 12, mid + 1), W(0.30f), hz);
             if (gFontSmall) ImGui::PopFont();
         }
-        y = top + NZONES * lane + 16;
-    }
-    // the shader answering the sound
-    {
-        label(gShaders.active() ? gShaders.currentTitle() : "SHADER", y);
-        float pw = std::min(w, 320.0f);
-        drawShaderPreview(dl, ImVec2(o.x, y + 18), pw);
-        y += 18 + pw * 9.0f / 16.0f + 8;
+        y = top + NZONES * (lane + laneGap) + 8;
     }
     ImGui::SetCursorScreenPos(ImVec2(o.x, y));
     ImGui::Dummy(ImVec2(w, 1));
 }
 
-// ── SHADERS: tiles, the live one previewed; its parameters underneath ──
+// ── shader thumbnails: every shader rendered once to a small still, kept on
+// disk (Application Support/AVA OS/thumbs/<id>.rgb) so the gallery is
+// instant from the second launch on. Cooking happens one shader per frame
+// while the gallery is open; the shader you had loaded comes back after. ──
+static const int kThumbW = 192, kThumbH = 108;
+static std::unordered_map<int, GLuint> gThumbTex;   // shader id → GL texture
+static std::set<int> gThumbMissing;                 // ids with no thumb on disk
+static int gThumbGen = -1;                          // entry index being cooked, -1 idle
+static int gThumbRestore = -2;                      // shader to reload when done (-1 = none, -2 = unset)
+static std::string thumbPath(int id) {
+    std::string dir = appSupportFile("thumbs");
+#ifndef _WIN32
+    mkdir(dir.c_str(), 0755);
+#endif
+    return dir + "/" + std::to_string(id) + ".rgb";
+}
+static GLuint uploadThumb(const unsigned char* rgb) {
+    GLuint t = 0;
+    glGenTextures(1, &t);
+    glBindTexture(GL_TEXTURE_2D, t);
+    glPixelStorei(GL_UNPACK_ALIGNMENT, 1);
+    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGB, kThumbW, kThumbH, 0, GL_RGB, GL_UNSIGNED_BYTE, rgb);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+    glBindTexture(GL_TEXTURE_2D, 0);
+    return t;
+}
+static bool loadThumbFromDisk(int id) {
+    FILE* f = fopen(thumbPath(id).c_str(), "rb");
+    if (!f) return false;
+    std::vector<unsigned char> rgb((size_t)kThumbW * kThumbH * 3);
+    size_t n = fread(rgb.data(), 1, rgb.size(), f);
+    fclose(f);
+    if (n != rgb.size()) return false;
+    gThumbTex[id] = uploadThumb(rgb.data());
+    return true;
+}
+// box-filter the live output down to the thumb, save it, upload it
+static void makeThumbFromOutput(int id) {
+    std::vector<unsigned char> rgba;
+    if (!gShaders.readOutput(rgba)) return;
+    const int W = gShaders.renderW, H = gShaders.renderH;
+    std::vector<unsigned char> rgb((size_t)kThumbW * kThumbH * 3);
+    for (int y = 0; y < kThumbH; y++) {
+        int y0 = y * H / kThumbH, y1 = std::max(y0 + 1, (y + 1) * H / kThumbH);
+        for (int x = 0; x < kThumbW; x++) {
+            int x0 = x * W / kThumbW, x1 = std::max(x0 + 1, (x + 1) * W / kThumbW);
+            unsigned r = 0, g = 0, b = 0, n = 0;
+            for (int yy = y0; yy < y1; yy++)
+                for (int xx = x0; xx < x1; xx++) {
+                    const unsigned char* px = &rgba[((size_t)yy * W + xx) * 4];
+                    r += px[0]; g += px[1]; b += px[2]; n++;
+                }
+            unsigned char* o = &rgb[((size_t)y * kThumbW + x) * 3];
+            o[0] = (unsigned char)(r / n); o[1] = (unsigned char)(g / n); o[2] = (unsigned char)(b / n);
+        }
+    }
+    if (FILE* f = fopen(thumbPath(id).c_str(), "wb")) { fwrite(rgb.data(), 1, rgb.size(), f); fclose(f); }
+    if (gThumbTex.count(id)) glDeleteTextures(1, &gThumbTex[id]);
+    gThumbTex[id] = uploadThumb(rgb.data());
+    gThumbMissing.erase(id);
+}
+// one step of cooking per frame; returns how many are still missing
+static int cookThumbnails() {
+    const auto& ents = gShaders.entries();
+    // first pass: pull whatever is already on disk
+    static bool scanned = false;
+    if (!scanned) {
+        scanned = true;
+        for (const auto& e : ents)
+            if (!gThumbTex.count(e.id) && !loadThumbFromDisk(e.id)) gThumbMissing.insert(e.id);
+    }
+    // nothing left → put the user's shader back
+    auto nextMissing = [&]() -> int {
+        for (int i = 0; i < (int)ents.size(); i++)
+            if (gThumbMissing.count(ents[i].id) && !gDeletedShaders.count(ents[i].id)) return i;
+        return -1;
+    };
+    if (gThumbGen < 0) {
+        int nx = nextMissing();
+        if (nx < 0) return 0;
+        gThumbRestore = gShaders.currentIndex();
+        gThumbGen = nx;
+    }
+    if (gShaders.load(gThumbGen)) {
+        AudioUniforms au;
+        au.level = 0.6f; au.bass = 0.7f; au.mid = 0.5f; au.high = 0.4f; au.sub = 0.6f; au.lowMid = 0.5f; au.onset = 0.3f; au.bpm = 120;
+        for (int k = 0; k < 6; k++) gShaders.render(4.0f + k * 0.03f, au, 0.5f, 0.5f, 0.0f);
+        makeThumbFromOutput(ents[gThumbGen].id);
+    } else {
+        gThumbMissing.erase(ents[gThumbGen].id);   // does not compile: skip it for good
+    }
+    int nx = nextMissing();
+    if (nx < 0) {
+        if (gThumbRestore >= 0) gShaders.load(gThumbRestore); else gShaders.unload();
+        gThumbGen = -1; gThumbRestore = -2;
+        return 0;
+    }
+    gThumbGen = nx;
+    return (int)gThumbMissing.size();
+}
+
+// ── SHADERS: the live one previewed in the centre; a gallery of stills;
+//    its parameters. Hover a tile for its × ; right-click also deletes. ──
 static void drawShadersBody(float w) {
     ImDrawList* dl = ImGui::GetWindowDrawList();
+    ImVec2 o = ImGui::GetCursorScreenPos();
+    if (gShaders.active()) {
+        if (gFontSmall) ImGui::PushFont(gFontSmall);
+        ImVec2 ts = ImGui::CalcTextSize(gShaders.currentTitle());
+        dl->AddText(ImVec2(o.x + (w - ts.x) / 2, o.y), W(0.35f), gShaders.currentTitle());
+        if (gFontSmall) ImGui::PopFont();
+        float ph = drawShaderPreviewCentered(dl, o, w, o.y + 18, 240.0f);
+        ImGui::SetCursorScreenPos(ImVec2(o.x, o.y + 18 + ph + 12));
+    }
+    int cooking = cookThumbnails();
     static char filter[64] = "";
     ImGui::SetNextItemWidth(-1);
     ImGui::InputTextWithHint("##f", "search", filter, sizeof(filter));
     auto lower = [](std::string s) { for (auto& c : s) c = (char)tolower(c); return s; };
     std::string f = lower(filter);
-    ImGui::BeginChild("##list", ImVec2(-1, 250), false, ImGuiWindowFlags_NoScrollbar);
+    float availH = ImGui::GetContentRegionAvail().y;
+    float listH = gShaders.active() ? std::max(220.0f, availH - 210.0f) : std::max(220.0f, availH - 24.0f);
+    ImGui::BeginChild("##list", ImVec2(-1, listH), false);
     dl = ImGui::GetWindowDrawList();
     const int cols = 3;
-    const float gap = 8, tileW = std::floor((w - (cols - 1) * gap) / cols), tileH = 64;
+    const float gap = 8, tileW = std::floor((w - 12 - (cols - 1) * gap) / cols);
+    const float imgH = std::floor(tileW * 9.0f / 16.0f), tileH = imgH + 26;
     int col = 0;
-    auto tile = [&](const char* id, const char* title, bool sel, bool live) -> bool {
+    int deleteId = -1;
+    auto tile = [&](const char* id, const char* title, bool sel, int shaderId) -> bool {
         if (col > 0) ImGui::SameLine(0, gap);
         ImVec2 p0 = ImGui::GetCursorScreenPos(), p1(p0.x + tileW, p0.y + tileH);
         bool pressed = ImGui::InvisibleButton(id, ImVec2(tileW, tileH));
         bool h = ImGui::IsItemHovered();
+        if (shaderId >= 0 && ImGui::BeginPopupContextItem(id)) {
+            if (ImGui::Selectable("Delete")) deleteId = shaderId;
+            ImGui::EndPopup();
+        }
         dl->AddRectFilled(p0, p1, sel ? IM_COL32(255, 255, 255, 30) : IM_COL32(255, 255, 255, h ? 16 : 8), 9);
+        // the still
+        ImVec2 i0(p0.x + 4, p0.y + 4), i1(p0.x + tileW - 4, p0.y + 4 + imgH - 4);
+        auto it = shaderId >= 0 ? gThumbTex.find(shaderId) : gThumbTex.end();
+        if (it != gThumbTex.end())
+            dl->AddImageRounded((ImTextureID)(intptr_t)it->second, i0, i1, ImVec2(0, 1), ImVec2(1, 0), IM_COL32_WHITE, 7);
+        else
+            dl->AddRectFilled(i0, i1, IM_COL32(0, 0, 0, 255), 7);
         if (sel) dl->AddRect(p0, p1, IM_COL32(255, 255, 255, 110), 9);
-        if (live && gShaders.outputTexture())
-            dl->AddImageRounded((ImTextureID)(intptr_t)gShaders.outputTexture(), ImVec2(p0.x + 6, p0.y + 6),
-                                ImVec2(p0.x + 6 + (tileH - 12) * 16.0f / 9.0f, p1.y - 6), ImVec2(0, 1), ImVec2(1, 0), IM_COL32_WHITE, 6);
+        // title under it
         dl->PushClipRect(p0, p1, true);
-        float tx = live ? p0.x + 12 + (tileH - 12) * 16.0f / 9.0f : p0.x + 12;
-        dl->AddText(ImVec2(tx, p0.y + tileH / 2 - 8), W(sel ? 0.97f : (h ? 0.9f : 0.7f)), title);
+        if (gFontSmall) ImGui::PushFont(gFontSmall);
+        dl->AddText(ImVec2(p0.x + 8, p1.y - 20), W(sel ? 0.97f : (h ? 0.9f : 0.7f)), title);
+        if (gFontSmall) ImGui::PopFont();
         dl->PopClipRect();
+        // × in the corner while hovered: delete without the menu
+        if (h && shaderId >= 0) {
+            ImVec2 xc(p1.x - 14, p0.y + 14);
+            ImGui::SetCursorScreenPos(ImVec2(xc.x - 10, xc.y - 10));
+            char xid[32]; snprintf(xid, sizeof xid, "%s_x", id);
+            if (ImGui::InvisibleButton(xid, ImVec2(20, 20))) { deleteId = shaderId; pressed = false; }
+            bool xh = ImGui::IsItemHovered();
+            dl->AddCircleFilled(xc, 9, IM_COL32(0, 0, 0, xh ? 230 : 160));
+            dl->AddLine(ImVec2(xc.x - 3.5f, xc.y - 3.5f), ImVec2(xc.x + 3.5f, xc.y + 3.5f), W(xh ? 1.0f : 0.8f), 1.5f);
+            dl->AddLine(ImVec2(xc.x - 3.5f, xc.y + 3.5f), ImVec2(xc.x + 3.5f, xc.y - 3.5f), W(xh ? 1.0f : 0.8f), 1.5f);
+            if (xh) { ImGui::SetTooltip("delete"); pressed = false; }
+        }
         col = (col + 1) % cols;
         if (col == 0) ImGui::Dummy(ImVec2(0, gap - 4));
         return pressed;
     };
-    if (tile("##none", "None", !gShaders.active(), false)) gShaders.unload();
+    if (tile("##none", "None", !gShaders.active(), -1)) gShaders.unload();
+    int hidden = 0;
     for (int i = 0; i < (int)gShaders.entries().size(); i++) {
         const auto& e = gShaders.entries()[i];
+        if (gDeletedShaders.count(e.id)) { hidden++; continue; }
         if (!f.empty() && lower(e.title).find(f) == std::string::npos) continue;
         char id[24]; snprintf(id, sizeof id, "##sh%d", i);
-        bool sel = i == gShaders.currentIndex();
-        if (tile(id, e.title.c_str(), sel, sel) && !sel) {
+        bool sel = i == gShaders.currentIndex() && gThumbGen < 0;
+        if (tile(id, e.title.c_str(), sel, e.id) && !sel && gThumbGen < 0) {
             if (!gShaders.load(i))
                 printf("shader load failed [%s]: %s\n", e.title.c_str(), gShaders.lastError.c_str());
         }
     }
     if (col != 0) ImGui::NewLine();
-    ImGui::EndChild();
-    if (gShaders.active()) {
+    if (hidden > 0) {
         if (gFontSmall) ImGui::PushFont(gFontSmall);
-        ImGui::TextDisabled("%s", gShaders.currentTitle());
+        ImGui::TextDisabled("%d deleted", hidden);
+        ImGui::SameLine();
+        if (ImGui::SmallButton("Restore all")) { gDeletedShaders.clear(); saveDeletedShaders(); }
         if (gFontSmall) ImGui::PopFont();
-        ImGui::BeginChild("##params", ImVec2(-1, 250));
-            std::string lastGroup = "\x01";
-            auto rowLabel = [](const std::string& l) {
-                ImGui::TextColored(ImVec4(1, 1, 1, 0.72f), "%s", l.c_str());
-            };
-            for (auto& p : gShaders.params()) {
-                if (p.group != lastGroup) {
-                    lastGroup = p.group;
-                    if (!p.group.empty()) {
-                        ImGui::Dummy(ImVec2(0, 6));
-                        if (gFontSmall) ImGui::PushFont(gFontSmall);
-                        ImGui::TextDisabled("%s", p.group.c_str());
-                        if (gFontSmall) ImGui::PopFont();
-                    }
+    }
+    ImGui::EndChild();
+    if (deleteId >= 0) {
+        if (gShaders.active() && gShaders.currentIndex() >= 0 &&
+            gShaders.entries()[gShaders.currentIndex()].id == deleteId) gShaders.unload();
+        gDeletedShaders.insert(deleteId);
+        saveDeletedShaders();
+    }
+    if (cooking > 0) {
+        if (gFontSmall) ImGui::PushFont(gFontSmall);
+        ImGui::TextDisabled("making previews  ·  %d to go", cooking);
+        if (gFontSmall) ImGui::PopFont();
+    }
+    if (gFontSmall) ImGui::PushFont(gFontSmall);
+    ImGui::TextDisabled("hover a tile for its ×  ·  right-click also deletes");
+    if (gFontSmall) ImGui::PopFont();
+    if (gShaders.active()) {
+        ImGui::BeginChild("##params", ImVec2(-1, std::max(90.0f, ImGui::GetContentRegionAvail().y - 30.0f)));
+        std::string lastGroup = "\x01";
+        auto rowLabel = [](const std::string& l) {
+            ImGui::TextColored(ImVec4(1, 1, 1, 0.72f), "%s", l.c_str());
+        };
+        for (auto& p : gShaders.params()) {
+            if (p.group != lastGroup) {
+                lastGroup = p.group;
+                if (!p.group.empty()) {
+                    ImGui::Dummy(ImVec2(0, 6));
+                    if (gFontSmall) ImGui::PushFont(gFontSmall);
+                    ImGui::TextDisabled("%s", p.group.c_str());
+                    if (gFontSmall) ImGui::PopFont();
                 }
-                ImGui::PushID(p.name.c_str());
-                switch (p.type) {
-                    case ShaderParam::Float:
-                    case ShaderParam::Event:
-                        rowLabel(p.label);
-                        ImGui::SetNextItemWidth(-1);
-                        ImGui::SliderFloat("##v", &p.cur[0], p.minV, p.maxV, "%.2f");
-                        break;
-                    case ShaderParam::Bool: {
-                        bool b = p.cur[0] > 0.5f;
-                        if (ImGui::Checkbox(p.label.c_str(), &b)) p.cur[0] = b ? 1.f : 0.f;
-                        break;
-                    }
-                    case ShaderParam::Long: {
-                        rowLabel(p.label);
-                        int cur = (int)p.cur[0];
-                        std::string preview = std::to_string(cur);
-                        for (size_t k = 0; k < p.values.size(); k++)
-                            if (p.values[k] == cur && k < p.labels.size()) preview = p.labels[k];
-                        ImGui::SetNextItemWidth(-1);
-                        if (ImGui::BeginCombo("##c", preview.c_str())) {
-                            for (size_t k = 0; k < p.values.size(); k++) {
-                                std::string l = k < p.labels.size() ? p.labels[k]
-                                                : std::to_string(p.values[k]);
-                                if (ImGui::Selectable(l.c_str(), p.values[k] == cur))
-                                    p.cur[0] = (float)p.values[k];
-                            }
-                            ImGui::EndCombo();
-                        }
-                        break;
-                    }
-                    case ShaderParam::Color:
-                        rowLabel(p.label);
-                        ImGui::SetNextItemWidth(-1);
-                        ImGui::ColorEdit4("##col", p.cur, ImGuiColorEditFlags_Float);
-                        break;
-                    case ShaderParam::Point2D:
-                        rowLabel(p.label);
-                        ImGui::SetNextItemWidth(-1);
-                        ImGui::DragFloat2("##pt", p.cur, 0.005f);
-                        break;
-                    case ShaderParam::Image:
-                        break; // not fed — hidden rather than noise
-                    case ShaderParam::Text: {
-                        rowLabel(p.label);
-                        char buf[128];
-                        snprintf(buf, sizeof(buf), "%s", p.text.c_str());
-                        ImGui::SetNextItemWidth(-1);
-                        if (ImGui::InputText("##t", buf, sizeof(buf)))
-                            p.text = buf;
-                        break;
-                    }
-                }
-                ImGui::PopID();
             }
+            ImGui::PushID(p.name.c_str());
+            switch (p.type) {
+                case ShaderParam::Float:
+                case ShaderParam::Event:
+                    rowLabel(p.label);
+                    ImGui::SetNextItemWidth(-1);
+                    ImGui::SliderFloat("##v", &p.cur[0], p.minV, p.maxV, "%.2f");
+                    break;
+                case ShaderParam::Bool: {
+                    bool b = p.cur[0] > 0.5f;
+                    if (ImGui::Checkbox(p.label.c_str(), &b)) p.cur[0] = b ? 1.f : 0.f;
+                    break;
+                }
+                case ShaderParam::Long: {
+                    rowLabel(p.label);
+                    int cur = (int)p.cur[0];
+                    std::string preview = std::to_string(cur);
+                    for (size_t k = 0; k < p.values.size(); k++)
+                        if (p.values[k] == cur && k < p.labels.size()) preview = p.labels[k];
+                    ImGui::SetNextItemWidth(-1);
+                    if (ImGui::BeginCombo("##c", preview.c_str())) {
+                        for (size_t k = 0; k < p.values.size(); k++) {
+                            std::string l = k < p.labels.size() ? p.labels[k]
+                                            : std::to_string(p.values[k]);
+                            if (ImGui::Selectable(l.c_str(), p.values[k] == cur))
+                                p.cur[0] = (float)p.values[k];
+                        }
+                        ImGui::EndCombo();
+                    }
+                    break;
+                }
+                case ShaderParam::Color:
+                    rowLabel(p.label);
+                    ImGui::SetNextItemWidth(-1);
+                    ImGui::ColorEdit4("##col", p.cur, ImGuiColorEditFlags_Float);
+                    break;
+                case ShaderParam::Point2D:
+                    rowLabel(p.label);
+                    ImGui::SetNextItemWidth(-1);
+                    ImGui::DragFloat2("##pt", p.cur, 0.005f);
+                    break;
+                case ShaderParam::Image:
+                    break;
+                case ShaderParam::Text: {
+                    rowLabel(p.label);
+                    char buf[128];
+                    snprintf(buf, sizeof(buf), "%s", p.text.c_str());
+                    ImGui::SetNextItemWidth(-1);
+                    if (ImGui::InputText("##t", buf, sizeof(buf)))
+                        p.text = buf;
+                    break;
+                }
+            }
+            ImGui::PopID();
+        }
         ImGui::EndChild();
         ImGui::Dummy(ImVec2(0, 2));
         if (ImGui::SmallButton("Reset"))
@@ -1985,60 +2188,56 @@ static void drawShadersBody(float w) {
     }
 }
 
-// ── DISPLAY: where the picture goes ──
+// ── DISPLAY: the picture, centred, and two buttons ──
 static void drawDisplayBody(GLFWwindow* win, float w) {
     ImDrawList* dl = ImGui::GetWindowDrawList();
-    if (gFontSmall) ImGui::PushFont(gFontSmall);
-    ImGui::TextDisabled("PREVIEW");
-    if (gFontSmall) ImGui::PopFont();
-    {
-        ImVec2 p0 = ImGui::GetCursorScreenPos();
-        float pw = std::min(w, 320.0f);
-        drawShaderPreview(dl, p0, pw);
-        ImGui::Dummy(ImVec2(pw, pw * 9.0f / 16.0f + 6));
-    }
-    ImGui::SetNextItemWidth(220);
+    ImVec2 o = ImGui::GetCursorScreenPos();
+    float ph = drawShaderPreviewCentered(dl, o, w, o.y);
+    float y = o.y + ph + 14;
+    const float pw = std::min(w, 320.0f), px = o.x + (w - pw) / 2;
+    ImGui::SetCursorScreenPos(ImVec2(px, y));
+    ImGui::SetNextItemWidth(pw);
     ImGui::SliderFloat("##edgefade", &gEdgeFade, 0.0f, 1.0f, "Edge fade  %.2f");
-    ImGui::Dummy(ImVec2(0, 8));
-    if (gFontSmall) ImGui::PushFont(gFontSmall);
-    ImGui::TextDisabled("FLOATING WINDOW");
-    if (gFontSmall) ImGui::PopFont();
-    if (ImGui::Button(gMini ? "Back to full window" : "Mini window  ·  stays on top", ImVec2(260, 30))) setMini(win, !gMini);
+    y += 44;
+    // two buttons, side by side, the same width as the picture
+    const float bw = (pw - 10) / 2, bh = 32;
+    ImGui::SetCursorScreenPos(ImVec2(px, y));
+    if (ImGui::Button(gMini ? "Back to viewport" : "Mini window", ImVec2(bw, bh))) setMini(win, !gMini);
     if (ImGui::IsItemHovered())
-        ImGui::SetTooltip("A small octagon that floats over Spotify, Ableton, anything.\nClick it and play the bed from the keyboard or MIDI without leaving your app.");
-    ImGui::Dummy(ImVec2(0, 8));
-    if (gFontSmall) ImGui::PushFont(gFontSmall);
-    ImGui::TextDisabled("PROJECTOR / SECOND SCREEN");
-    if (gFontSmall) ImGui::PopFont();
-    if (gExtWin && ImGui::Selectable("Close the projector output")) {
-        glfwDestroyWindow(gExtWin);
-        gExtWin = nullptr;
-        glfwMakeContextCurrent(win);
-    }
-    int mcount = 0;
-    GLFWmonitor** mons = glfwGetMonitors(&mcount);
-    GLFWmonitor* mainMon = glfwGetPrimaryMonitor();
-    for (int m = 0; m < mcount; m++) {
-        const GLFWvidmode* mode = glfwGetVideoMode(mons[m]);
-        char row[160];
-        snprintf(row, sizeof(row), "%s  ·  %dx%d%s", glfwGetMonitorName(mons[m]),
-                 mode->width, mode->height,
-                 mons[m] == mainMon ? "  (this screen)" : "");
-        if (ImGui::Selectable(row)) {
-            if (gExtWin) { glfwDestroyWindow(gExtWin); gExtWin = nullptr; }
-            glfwWindowHint(GLFW_CONTEXT_VERSION_MAJOR, 3);
-            glfwWindowHint(GLFW_CONTEXT_VERSION_MINOR, 2);
-            glfwWindowHint(GLFW_OPENGL_PROFILE, GLFW_OPENGL_CORE_PROFILE);
-            glfwWindowHint(GLFW_OPENGL_FORWARD_COMPAT, GL_TRUE);
-            glfwWindowHint(GLFW_AUTO_ICONIFY, GLFW_FALSE);
-            gExtWin = glfwCreateWindow(mode->width, mode->height,
-                                       "AVA Output", mons[m], win);
-            if (gExtWin) {
-                glfwMakeContextCurrent(gExtWin);
-                glfwSwapInterval(0); // avoid double-vsync stall
-                glfwMakeContextCurrent(win);
+        ImGui::SetTooltip(gMini ? "the full window again" : "a small octagon that floats over Spotify, Ableton, anything");
+    ImGui::SameLine(0, 10);
+    if (ImGui::Button(gExtWin ? "Projector: on" : "Projector", ImVec2(bw, bh))) ImGui::OpenPopup("##projector");
+    if (ImGui::IsItemHovered()) ImGui::SetTooltip("send the picture to a second screen or projector");
+    if (ImGui::BeginPopup("##projector")) {
+        if (gExtWin && ImGui::Selectable("Close the projector output")) {
+            glfwDestroyWindow(gExtWin);
+            gExtWin = nullptr;
+            glfwMakeContextCurrent(win);
+        }
+        int mcount = 0;
+        GLFWmonitor** mons = glfwGetMonitors(&mcount);
+        GLFWmonitor* mainMon = glfwGetPrimaryMonitor();
+        for (int m = 0; m < mcount; m++) {
+            const GLFWvidmode* mode = glfwGetVideoMode(mons[m]);
+            char row[160];
+            snprintf(row, sizeof(row), "%s  ·  %dx%d%s", glfwGetMonitorName(mons[m]),
+                     mode->width, mode->height, mons[m] == mainMon ? "  (this screen)" : "");
+            if (ImGui::Selectable(row)) {
+                if (gExtWin) { glfwDestroyWindow(gExtWin); gExtWin = nullptr; }
+                glfwWindowHint(GLFW_CONTEXT_VERSION_MAJOR, 3);
+                glfwWindowHint(GLFW_CONTEXT_VERSION_MINOR, 2);
+                glfwWindowHint(GLFW_OPENGL_PROFILE, GLFW_OPENGL_CORE_PROFILE);
+                glfwWindowHint(GLFW_OPENGL_FORWARD_COMPAT, GL_TRUE);
+                glfwWindowHint(GLFW_AUTO_ICONIFY, GLFW_FALSE);
+                gExtWin = glfwCreateWindow(mode->width, mode->height, "AVA Output", mons[m], win);
+                if (gExtWin) {
+                    glfwMakeContextCurrent(gExtWin);
+                    glfwSwapInterval(0);
+                    glfwMakeContextCurrent(win);
+                }
             }
         }
+        ImGui::EndPopup();
     }
 }
 
@@ -2563,6 +2762,7 @@ int main(int argc, char** argv) {
 #endif
     for (auto& row : gOutCcLast) for (int& v : row) v = -1;
     loadTunerState();
+    loadDeletedShaders();
 
     // shader background library — bundled copy first, dev checkout as fallback
     gShaders.loadLibrary(shaderLibraryDir());
@@ -2661,6 +2861,26 @@ int main(int argc, char** argv) {
         dl->AddCircleFilled(ImVec2(42, 40), 10, W(0.18f));
         dl->AddCircleFilled(ImVec2(42, 40), 6, W(0.95f));
         dl->AddText(ImVec2(60, 32), W(0.95f), "AVA OS");
+        // global channel mode — MONO · STEREO · SURROUND — lives up here so it
+        // is reachable from Audio, Visual and Artifact alike
+        {
+            static const char* gm[3] = {"MONO", "STEREO", "SURROUND"};
+            static const int gmMode[3] = {2, 3, 4};
+            int em = gEngine.params.engineMode.load();
+            float x = 190;
+            if (gFontSmall) ImGui::PushFont(gFontSmall);
+            for (int i = 0; i < 3; i++) {
+                ImVec2 ts = ImGui::CalcTextSize(gm[i]);
+                ImGui::SetCursorScreenPos(ImVec2(x - 6, 30));
+                char id[16]; snprintf(id, sizeof id, "##gm%d", i);
+                if (ImGui::InvisibleButton(id, ImVec2(ts.x + 12, 24))) gEngine.params.engineMode.store(gmMode[i]);
+                bool on = em == gmMode[i], hov = ImGui::IsItemHovered();
+                dl->AddText(ImVec2(x, 42 - ts.y / 2), W(on ? 0.95f : (hov ? 0.7f : 0.35f)), gm[i]);
+                if (on) dl->AddLine(ImVec2(x, 42 + ts.y / 2 + 3), ImVec2(x + ts.x, 42 + ts.y / 2 + 3), W(0.9f), 1.5f);
+                x += ts.x + 22;
+            }
+            if (gFontSmall) ImGui::PopFont();
+        }
 
         if (gShowHealth) {
             double tnow = glfwGetTime();
@@ -3289,13 +3509,13 @@ int main(int argc, char** argv) {
             if (gFontSmall) ImGui::PopFont();
             // engine mode: BODY (one root, five mixes) vs SPLIT (five layers of the song)
             {
-                static const char* modes[5] = {"SYNTH", "SPLIT", "MONO", "STEREO", "BODY"};
+                static const char* modes[5] = {"SYNTH", "SPLIT", "MONO", "STEREO", "SURROUND"};
                 static const char* modeTips[5] = {
                     "SYNTH: one root note, five mixes of it. The original engine.",
                     "SPLIT: feet = sub, root = bass line, belly = drums,\nheart = vocal/chord melody, head = lead/air melody. Five layers at once.",
                     "MONO: the song itself, felt. Its low end to every zone,\nbass exaggerated x2, plus an octave-down copy of bass the rings can't move.",
                     "STEREO: MONO split left / right. Send 1 = left side, send 2 = right side\nof each ring (low-end width x2); the feet stay mono.",
-                    "BODY: 3 channels. Head+heart = the voice, belly+root = bass line + drums,\nfeet = LFE sub (+10 dB). A head-to-toe roll fires only on a clear bass drop."};
+                    "SURROUND: 3 channels. Head+heart = the voice, belly+root = bass line + drums,\nfeet = LFE sub (+10 dB). A head-to-toe roll fires only on a clear bass drop."};
                 int em = gEngine.params.engineMode.load();
                 float x = mx + mw - 16;
                 for (int m = 4; m >= 0; m--) {

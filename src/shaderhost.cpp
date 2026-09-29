@@ -16,6 +16,16 @@ static std::string readFile(const std::string& p) {
     return ss.str();
 }
 
+bool ShaderHost::readOutput(std::vector<unsigned char>& rgba) const {
+    if (!outFbo_) return false;
+    rgba.resize((size_t)renderW * renderH * 4);
+    glBindFramebuffer(GL_FRAMEBUFFER, outFbo_);
+    glPixelStorei(GL_PACK_ALIGNMENT, 1);
+    glReadPixels(0, 0, renderW, renderH, GL_RGBA, GL_UNSIGNED_BYTE, rgba.data());
+    glBindFramebuffer(GL_FRAMEBUFFER, 0);
+    return true;
+}
+
 bool ShaderHost::loadLibrary(const std::string& dir) {
     libDir_ = dir;
     entries_.clear();

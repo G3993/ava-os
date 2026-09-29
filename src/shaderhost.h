@@ -46,6 +46,8 @@ public:
     void render(float timeSec, const AudioUniforms& au,
                 float mouseX, float mouseY, float mouseDown);
     GLuint outputTexture() const { return outTex_; }
+    // copy the current output (renderW x renderH RGBA, GL row order) — for thumbnails
+    bool readOutput(std::vector<unsigned char>& rgba) const;
     bool active() const { return prog_ != 0; }
 
     // draw a texture as a fullscreen quad in the CURRENT GL context
