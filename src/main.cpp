@@ -12,6 +12,7 @@
 #include <unordered_map>
 #include <algorithm>
 #include <thread>
+#include <mutex>
 #include <chrono>
 #include <csignal>
 #ifndef _WIN32
@@ -30,6 +31,7 @@
 #include <CoreAudio/CoreAudio.h>
 #endif
 #include "shaderhost.h"
+#include "icon_mark.h"
 #ifdef __APPLE__
 #include "midi_in.h"
 #include "midi_out.h"
@@ -235,6 +237,45 @@ static void setTakeOver(bool on) {
     gEngine.params.takeOver.store(on ? 1 : 0);
     gTap.muteSources = on;
     if (gTap.running() && gTapState.load() != 1) { gTap.stop(); startTapAsync(); }
+}
+// ── CoreAudio never on the UI thread ──
+// Listing devices and reading a device's hardware volume can block for
+// seconds while macOS re-enumerates audio (plugging the interface in is
+// exactly when that happens), and the window would go "not responding".
+// A scanner thread refreshes a snapshot every 2 s; the UI only reads it.
+static std::mutex gDevMx;
+static std::vector<OutDevice> gDevScan;
+static std::atomic<int> gDevScanGen{0};
+static std::atomic<float> gHwVolScan{-1.0f};
+static std::atomic<unsigned> gHwVolWantId{0};
+static std::vector<OutDevice> devicesSnapshot() { std::lock_guard<std::mutex> lk(gDevMx); return gDevScan; }
+static void startDeviceScanner() {
+    std::thread([] {
+        for (;;) {
+            auto d = listOutputDevices();
+            unsigned id = gHwVolWantId.load();
+            float hv = id ? deviceHwVolume(id) : -1.0f;
+            { std::lock_guard<std::mutex> lk(gDevMx); gDevScan = std::move(d); }
+            gHwVolScan.store(hv);
+            gDevScanGen.fetch_add(1);
+            std::this_thread::sleep_for(std::chrono::milliseconds(2000));
+        }
+    }).detach();
+}
+// starting / stopping the output unit also talks to the HAL: do it on a
+// worker, serialised, so a click or a hot-plug never freezes the window
+static std::mutex gAudioMx;
+static void startAudio();
+static void stopAudio();
+static std::atomic<int> gAudioBusy{0};
+static void restartAudioAsync() {
+    std::thread([] {
+        std::lock_guard<std::mutex> lk(gAudioMx);
+        gAudioBusy.store(1);
+        stopAudio();
+        startAudio();
+        gAudioBusy.store(0);
+    }).detach();
 }
 static void startAudio() {
     if (!gTap.running()) startTapAsync();
@@ -2773,6 +2814,8 @@ int main(int argc, char** argv) {
     gRing.init(48000); // 1 s
     gOut.player = &gPlayer;
     gDevices = listOutputDevices();
+    { std::lock_guard<std::mutex> lk(gDevMx); gDevScan = gDevices; }
+    startDeviceScanner();
     // default: first device with >=7 out channels (the interface); otherwise
     // the OS default output — on a laptop the tap mutes the music apps, so we
     // must be on the device the person is listening to or the music vanishes
@@ -2868,20 +2911,19 @@ int main(int argc, char** argv) {
         // device (it was plugged in after launch), move to it — otherwise the
         // bed silently never moves and the music plays from the laptop
         {
-            static double tScan = 0;
-            double tnow = glfwGetTime();
+            static int seenGen = 0;
+            int gen = gDevScanGen.load();
             bool onStereo = gSelDevice < 0 || gSelDevice >= (int)gDevices.size() || gDevices[gSelDevice].channels < 7;
-            if (onStereo && tnow - tScan > 3.0) {
-                tScan = tnow;
-                auto devs = listOutputDevices();
+            if (onStereo && gen != seenGen && gAudioBusy.load() == 0) {
+                seenGen = gen;
+                auto devs = devicesSnapshot();
                 for (int i = 0; i < (int)devs.size(); i++)
                     if (devs[i].channels >= 7) {
                         gDevices = devs;
                         gSelDevice = i;
                         fprintf(stderr, "[output] interface appeared: %s — switching\n", devs[i].name.c_str());
-                        stopAudio();
                         setTakeOver(defaultOutputDevice() != devs[i].id);
-                        startAudio();
+                        restartAudioAsync();
                         break;
                     }
             }
@@ -2907,9 +2949,20 @@ int main(int argc, char** argv) {
         } else {
 
         // ── header: logo dot + name ──
-        dl->AddCircleFilled(ImVec2(42, 40), 10, W(0.18f));
-        dl->AddCircleFilled(ImVec2(42, 40), 6, W(0.95f));
-        dl->AddText(ImVec2(60, 32), W(0.95f), "AVA OS");
+        {
+            static GLuint markTex = 0;
+            if (!markTex) {
+                glGenTextures(1, &markTex);
+                glBindTexture(GL_TEXTURE_2D, markTex);
+                glPixelStorei(GL_UNPACK_ALIGNMENT, 1);
+                glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, kIconMarkW, kIconMarkH, 0, GL_RGBA, GL_UNSIGNED_BYTE, kIconMark);
+                glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+                glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+                glBindTexture(GL_TEXTURE_2D, 0);
+            }
+            dl->AddImage((ImTextureID)(intptr_t)markTex, ImVec2(26, 24), ImVec2(58, 56));
+        }
+        dl->AddText(ImVec2(66, 32), W(0.95f), "AVA OS");
 
         if (gShowHealth) {
             double tnow = glfwGetTime();
@@ -2918,7 +2971,7 @@ int main(int argc, char** argv) {
                 gHealthScanT = tnow;
                 gDevPresent = false;
                 if (gSelDevice >= 0 && gSelDevice < (int)gDevices.size())
-                    for (auto& d : listOutputDevices())
+                    for (auto& d : devicesSnapshot())
                         if (d.id == gDevices[gSelDevice].id) { gDevPresent = true; break; }
             }
             ImGui::SetNextWindowPos(ImVec2(W_ - 542, 66), ImGuiCond_FirstUseEver);
@@ -2946,10 +2999,10 @@ int main(int argc, char** argv) {
                             snprintf(row, sizeof(row), "%s  ·  %d out", gDevices[i].name.c_str(), gDevices[i].channels);
                             if (ImGui::Selectable(row, i == gSelDevice)) {
                                 gSelDevice = i;
-                                if (gPlaying) { stopAudio(); startAudio(); }
+                                restartAudioAsync();
                             }
                         }
-                        if (ImGui::Selectable("Rescan")) gDevices = listOutputDevices();
+                        if (ImGui::Selectable("Rescan")) gDevices = devicesSnapshot();
                         ImGui::EndCombo();
                     }
                     ImGui::SameLine();
@@ -2958,7 +3011,8 @@ int main(int argc, char** argv) {
                     else if (!gOut.running()) ImGui::TextColored(ImVec4(1, 0.75f, 0.3f, 1), "stopped");
                     else ImGui::TextColored(ImVec4(0.4f, 1, 0.5f, 1), "live");
                     if (devOk) {
-                        float hw = deviceHwVolume(gDevices[gSelDevice].id);
+                        gHwVolWantId.store(gDevices[gSelDevice].id);
+                        float hw = gHwVolScan.load();
                         if (hw >= 0) {
                             ImGui::Text("Interface volume  %.0f%%", hw * 100.0f);
                             if (hw < 0.999f) {
@@ -3254,10 +3308,10 @@ int main(int argc, char** argv) {
                              i == gSelDevice ? "   ●" : "");
                     if (ImGui::Selectable(row)) {
                         gSelDevice = i;
-                        if (gPlaying) { stopAudio(); startAudio(); }
+                        restartAudioAsync();
                     }
                 }
-                if (ImGui::Selectable("Rescan devices")) gDevices = listOutputDevices();
+                if (ImGui::Selectable("Rescan devices")) gDevices = devicesSnapshot();
 
                 // ── music + surround on the selected device ──
                 ImGui::Separator();
