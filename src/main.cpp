@@ -1831,7 +1831,7 @@ static float drawShaderPreviewCentered(ImDrawList* dl, ImVec2 o, float w, float 
 }
 
 // ── WAVE: MASTER (input) and the five rings (output) as scopes ──
-static float gScopeZoom = 2.0f;   // 1 = the whole 2.7 s buffer, 8 = the last third of a second
+static float gScopeZoom = 1.5f;   // 1 = the whole 340 ms buffer, 8 = the last ~40 ms
 static float gScopeGain = 1.0f;
 static void drawWaveBody(float w) {
     ImDrawList* dl = ImGui::GetWindowDrawList();
@@ -1859,18 +1859,24 @@ static void drawWaveBody(float w) {
             float v = sampleAt(buf, i) * gain;
             pts[i] = ImVec2(x0 + (x1 - x0) * i / (float)(P - 1), mid - amp * std::max(-1.0f, std::min(1.0f, v)));
         }
-        dl->AddPolyline(pts, P, glow, 0, 3.0f);
-        dl->AddPolyline(pts, P, line, 0, 1.2f);
+        dl->AddPolyline(pts, P, glow, 0, 4.0f);
+        dl->AddPolyline(pts, P, line, 0, 1.6f);
     };
     // ── MASTER · Input ──
     {
         label("MASTER   ·   Input", y);
-        float hh = 120, top = y + 18;
+        float hh = 150, top = y + 18;
         const float vs = hh;                       // vectorscope square on the right
         float wx1 = o.x + w - vs - 10;             // wave ends where the scope begins
         dl->AddRectFilled(ImVec2(o.x, top), ImVec2(o.x + w, top + hh), IM_COL32(8, 8, 9, 255), 12);
         dl->AddLine(ImVec2(o.x + 12, top + hh / 2), ImVec2(wx1 - 8, top + hh / 2), W(0.06f), 1);
-        trace(gEngine.scope, o.x + 12, wx1 - 8, top + hh / 2, hh * 0.40f, gScopeGain, W(0.22f), W(0.92f));
+        {
+            // auto-scale the input like the rings, so a quiet song still draws a wave
+            float pk = 1e-3f;
+            for (int i = 0; i < span; i++) pk = std::max(pk, std::fabs(gEngine.scope[(first + i) % N]));
+            float g = gScopeGain * 0.9f / std::max(pk, 0.02f);
+            trace(gEngine.scope, o.x + 12, wx1 - 8, top + hh / 2, hh * 0.42f, g, W(0.25f), W(0.95f));
+        }
         // ── vectorscope: L against R, turned 45° so mono is a vertical line,
         //    width opens it into a cloud; the last ~21 ms of samples ──
         {
@@ -1913,15 +1919,20 @@ static void drawWaveBody(float w) {
         ImGui::SetNextItemWidth(118);
         ImGui::SliderFloat("##gain", &gScopeGain, 0.25f, 4.0f, "gain %.2fx");
         if (gFontSmall) ImGui::PopFont();
-        const float lane = 44, laneGap = 8, top = y + 22;
+        const float laneGap = 8, top = y + 22;
+        // the lanes take whatever height the card has left
+        float roomH = ImGui::GetWindowPos().y + ImGui::GetWindowSize().y - top - 16;
+        const float lane = std::max(44.0f, std::min(110.0f, (roomH - 4 * laneGap) / NZONES));
         for (int z = 0; z < NZONES; z++) {
-            float ly = top + z * (lane + laneGap), mid = ly + lane / 2, amp = lane * 0.40f;
+            float ly = top + z * (lane + laneGap), mid = ly + lane / 2, amp = lane * 0.42f;
             float lvl = gEngine.meter[2 + z].load();
             dl->AddRectFilled(ImVec2(o.x, ly), ImVec2(o.x + w, ly + lane), IM_COL32(8, 8, 9, 255), 10);
             dl->AddLine(ImVec2(o.x + 72, mid), ImVec2(o.x + w - 12, mid), W(0.05f), 1);
-            // gentle auto-scale (never more than 3x) so quiet rings still read
-            float gain = gScopeGain * std::min(3.0f, 1.0f / std::max(0.3f, lvl));
-            trace(gEngine.vibScope[z], o.x + 72, o.x + w - 12, mid, amp, gain, W(0.08f + 0.2f * lvl), W(0.45f + 0.5f * lvl));
+            // auto-scale each ring to its own recent peak so every lane draws a full wave
+            float pk = 1e-3f;
+            for (int i = 0; i < span; i++) pk = std::max(pk, std::fabs(gEngine.vibScope[z][(first + i) % N]));
+            float gain = gScopeGain * 0.9f / std::max(pk, 0.02f);
+            trace(gEngine.vibScope[z], o.x + 72, o.x + w - 12, mid, amp, gain, W(0.10f + 0.2f * lvl), W(0.55f + 0.4f * lvl));
             if (gFontSmall) ImGui::PushFont(gFontSmall);
             dl->AddText(ImVec2(o.x + 12, mid - 13), W(0.75f), kZoneNames[z]);
             char hz[16]; snprintf(hz, sizeof hz, "%.0f Hz", gEngine.zoneHz[z].load());

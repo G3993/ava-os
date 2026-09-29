@@ -250,7 +250,7 @@ void Engine::process(const float* inL, const float* inR, float** out, int n) {
         // scope for UI
         bool doScope = false;
         int scopeIdx = 0;
-        if (++scopeDecim_ >= 256) {
+        if (++scopeDecim_ >= 32) {
             scopeDecim_ = 0;
             doScope = true;
             scopeIdx = scopeW.load(std::memory_order_relaxed);
