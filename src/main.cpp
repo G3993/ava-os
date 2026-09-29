@@ -1061,6 +1061,25 @@ static void keyReleaseSlot(LaunchSlot sl) {
 }
 static void keyboardLauncher() {
     ImGuiIO& io = ImGui::GetIO();
+    // Keys count only once the window has been focused for a moment: a
+    // keystroke meant for the app you were typing in when AVA opened must
+    // not fire the whole bed. Losing focus lets go of everything held, so a
+    // key-up that never reaches us cannot leave a pad sounding forever.
+    static double focusedSince = -1.0;
+    bool focused = glfwGetWindowAttrib(glfwGetCurrentContext(), GLFW_FOCUSED) == GLFW_TRUE;
+    if (!focused) {
+        focusedSince = -1.0;
+        bool any = gKeySpace;
+        for (int r = 0; r < 4 && !any; r++) for (int k = 0; k < 8; k++) any |= gKeyDown[r][k];
+        if (any) {
+            for (int r = 0; r < 4; r++) for (int k = 0; k < 8; k++)
+                if (gKeyDown[r][k]) { gKeyDown[r][k] = false; keyReleaseSlot(launchSlot(kKeyRowRing[r], k)); }
+            if (gKeySpace) { gKeySpace = false; int cur = std::min(std::max(gEngine.params.padPatch.load(), 0), NPATCHES - 1); keyReleaseSlot({0, cur}); }
+        }
+        return;
+    }
+    if (focusedSince < 0) focusedSince = glfwGetTime();
+    if (glfwGetTime() - focusedSince < 0.4) return;
     if (io.WantTextInput) return;
     static const ImGuiKey rows[4][8] = {
         {ImGuiKey_1, ImGuiKey_2, ImGuiKey_3, ImGuiKey_4, ImGuiKey_5, ImGuiKey_6, ImGuiKey_7, ImGuiKey_8},
