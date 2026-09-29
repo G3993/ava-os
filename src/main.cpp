@@ -3167,8 +3167,34 @@ int main(int argc, char** argv) {
         // ── octagon (left) ──
         float rightW = std::min(700.0f, W_ * 0.46f);
         float leftW = W_ - rightW;
-        ImVec2 octC(leftW * 0.5f, H_ * 0.47f);
-        float octR = std::min(leftW, H_) * 0.42f;
+        ImVec2 octC(leftW * 0.5f, H_ * 0.49f);
+        float octR = std::min(leftW, H_) * 0.39f;
+        // engine mode, centred above the octagon: SYNTH · SPLIT · MONO · STEREO · SURROUND
+        {
+            static const char* modes[5] = {"SYNTH", "SPLIT", "MONO", "STEREO", "SURROUND"};
+            static const char* modeTips[5] = {
+                "SYNTH: one root note, five mixes of it. The original engine.",
+                "SPLIT: feet = sub, root = bass line, belly = drums,\nheart = vocal/chord melody, head = lead/air melody. Five layers at once.",
+                "MONO: the song itself, felt. Its low end to every zone,\nbass exaggerated x2, plus an octave-down copy of bass the rings can't move.",
+                "STEREO: MONO split left / right. Send 1 = left side, send 2 = right side\nof each ring (low-end width x2); the feet stay mono.",
+                "SURROUND: 3 channels. Head+heart = the voice, belly+root = bass line + drums,\nfeet = LFE sub (+10 dB). A head-to-toe roll fires only on a clear bass drop."};
+            int em = gEngine.params.engineMode.load();
+            const float gap = 22;
+            float total = 0;
+            for (int m = 0; m < 5; m++) total += ImGui::CalcTextSize(modes[m]).x + (m ? gap : 0);
+            float x = octC.x - total / 2, cy = octC.y - octR - 24;
+            for (int m = 0; m < 5; m++) {
+                ImVec2 ts = ImGui::CalcTextSize(modes[m]);
+                ImGui::SetCursorScreenPos(ImVec2(x - 6, cy - 13));
+                char id[16]; snprintf(id, sizeof(id), "##em%d", m);
+                if (ImGui::InvisibleButton(id, ImVec2(ts.x + 12, 26))) gEngine.params.engineMode.store(m);
+                bool on = em == m, hov = ImGui::IsItemHovered();
+                if (hov) ImGui::SetTooltip("%s", modeTips[m]);
+                dl->AddText(ImVec2(x, cy - ts.y / 2), W(on ? 0.95f : (hov ? 0.7f : 0.35f)), modes[m]);
+                if (on) dl->AddLine(ImVec2(x, cy + ts.y / 2 + 4), ImVec2(x + ts.x, cy + ts.y / 2 + 4), W(0.9f), 1.5f);
+                x += ts.x + gap;
+            }
+        }
 
         drawShaderOctagon(dl, octC, octR);   // the shader shows through the glass, masked to the body
         if (gMode == 2) drawOctagonLauncher(dl, octC, octR);
@@ -3178,7 +3204,7 @@ int main(int argc, char** argv) {
 
         // ── transport pill under octagon ──
         {
-            float pw = std::min(780.0f, leftW - 40.0f), ph = 56;
+            float pw = 470, ph = 56;
             ImVec2 p0(octC.x - pw / 2, H_ - ph - 26), p1(octC.x + pw / 2, H_ - 26);
             dl->AddRectFilled(p0, p1, IM_COL32(18, 18, 20, 235), ph / 2);
             dl->AddRect(p0, p1, W(0.08f), ph / 2);
@@ -3377,35 +3403,8 @@ int main(int argc, char** argv) {
                 ImGui::EndPopup();
             }
 
-            // engine mode, right after Output: SYNTH · SPLIT · MONO · STEREO · SURROUND
-            float modesEnd = p0.x + 24 + 86 + 20;
-            {
-                static const char* modes[5] = {"SYNTH", "SPLIT", "MONO", "STEREO", "SURROUND"};
-                static const char* modeTips[5] = {
-                    "SYNTH: one root note, five mixes of it. The original engine.",
-                    "SPLIT: feet = sub, root = bass line, belly = drums,\nheart = vocal/chord melody, head = lead/air melody. Five layers at once.",
-                    "MONO: the song itself, felt. Its low end to every zone,\nbass exaggerated x2, plus an octave-down copy of bass the rings can't move.",
-                    "STEREO: MONO split left / right. Send 1 = left side, send 2 = right side\nof each ring (low-end width x2); the feet stay mono.",
-                    "SURROUND: 3 channels. Head+heart = the voice, belly+root = bass line + drums,\nfeet = LFE sub (+10 dB). A head-to-toe roll fires only on a clear bass drop."};
-                int em = gEngine.params.engineMode.load();
-                float x = modesEnd, cy = p0.y + ph / 2;
-                if (gFontSmall) ImGui::PushFont(gFontSmall);
-                for (int m = 0; m < 5; m++) {
-                    ImVec2 ts = ImGui::CalcTextSize(modes[m]);
-                    ImGui::SetCursorScreenPos(ImVec2(x - 5, cy - 12));
-                    char id[16]; snprintf(id, sizeof(id), "##em%d", m);
-                    if (ImGui::InvisibleButton(id, ImVec2(ts.x + 10, 24))) gEngine.params.engineMode.store(m);
-                    bool on = em == m, hov = ImGui::IsItemHovered();
-                    if (hov) ImGui::SetTooltip("%s", modeTips[m]);
-                    dl->AddText(ImVec2(x, cy - ts.y / 2), W(on ? 0.95f : (hov ? 0.7f : 0.35f)), modes[m]);
-                    if (on) dl->AddLine(ImVec2(x, cy + ts.y / 2 + 3), ImVec2(x + ts.x, cy + ts.y / 2 + 3), W(0.9f), 1.5f);
-                    x += ts.x + 14;
-                }
-                if (gFontSmall) ImGui::PopFont();
-                modesEnd = x;
-            }
             // transport buttons
-            float bx = modesEnd + 26, by = p0.y + ph / 2;
+            float bx = p0.x + 24 + 86 + 34, by = p0.y + ph / 2;
             // play/pause circle
             ImGui::SetCursorScreenPos(ImVec2(bx - 16, by - 16));
             if (ImGui::InvisibleButton("##play", ImVec2(32, 32))) {
