@@ -2334,13 +2334,31 @@ static void drawShadersBody(float w) {
         ImGui::SetCursorScreenPos(ImVec2(o.x, o.y + 18 + ph + 12));
     }
     int cooking = cookThumbnails();
+    // the gallery folds away once a shader is chosen so its parameters get
+    // the room; the header row reopens it
+    static bool galleryOpen = true;
+    static bool wasActive = false;
+    if (gShaders.active() && !wasActive) galleryOpen = false;
+    wasActive = gShaders.active();
     static char filter[64] = "";
-    ImGui::SetNextItemWidth(-1);
-    ImGui::InputTextWithHint("##f", "search", filter, sizeof(filter));
+    {
+        if (gFontSmall) ImGui::PushFont(gFontSmall);
+        const char* lbl = galleryOpen ? "GALLERY  v" : "GALLERY  >";
+        if (ImGui::SmallButton(lbl)) galleryOpen = !galleryOpen;
+        if (ImGui::IsItemHovered()) ImGui::SetTooltip(galleryOpen ? "fold the gallery away" : "open the gallery");
+        if (gFontSmall) ImGui::PopFont();
+        if (galleryOpen) {
+            ImGui::SameLine(0, 10);
+            ImGui::SetNextItemWidth(-1);
+            ImGui::InputTextWithHint("##f", "search", filter, sizeof(filter));
+        }
+    }
     auto lower = [](std::string s) { for (auto& c : s) c = (char)tolower(c); return s; };
     std::string f = lower(filter);
     float availH = ImGui::GetContentRegionAvail().y;
-    float listH = gShaders.active() ? std::max(220.0f, availH - 210.0f) : std::max(220.0f, availH - 24.0f);
+    float listH = !galleryOpen ? 1.0f
+                : gShaders.active() ? std::max(220.0f, availH - 210.0f) : std::max(220.0f, availH - 24.0f);
+    if (galleryOpen) {
     ImGui::BeginChild("##list", ImVec2(-1, listH), false);
     dl = ImGui::GetWindowDrawList();
     const int cols = 3;
@@ -2424,6 +2442,7 @@ static void drawShadersBody(float w) {
     if (gFontSmall) ImGui::PushFont(gFontSmall);
     ImGui::TextDisabled("hover a tile for its ×  ·  right-click also deletes");
     if (gFontSmall) ImGui::PopFont();
+    } // galleryOpen
     if (gShaders.active()) {
         ImGui::BeginChild("##params", ImVec2(-1, std::max(90.0f, ImGui::GetContentRegionAvail().y - 30.0f)));
         std::string lastGroup = "\x01";
