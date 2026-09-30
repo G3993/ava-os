@@ -45,6 +45,7 @@ static int runSelfTest();
 #ifndef TEMPLE_SELFTEST_ONLY
 #include "imgui.h"
 #include "imgui_internal.h"
+#include "floaters_path.h"
 #include "imgui_impl_glfw.h"
 #include "imgui_impl_opengl3.h"
 #include <GLFW/glfw3.h>
@@ -2012,7 +2013,8 @@ static float gScopeRate = 12.0f;  // refreshes per second; low = calm, 60 = live
 static float gScopeHold = 0.35f;  // frame blending 0..0.95: how much of the last picture stays
 static bool  gScopeFreeze = false;
 static bool gVecBig = false;      // vectorscope: small beside the wave, or large
-static int  gVecMode = 0;         // 0 = input L/R · 1 = HEAD×FEET · 2 = HEART×BELLY · 3 = ROOT×FEET (ring Lissajous)
+static int  gVecMode = 4;         // 0 = input L/R · 1 = HEAD×FEET · 2 = HEART×BELLY · 3 = ROOT×FEET (ring Lissajous) · 4 = FLOATERS (the mark, drawn by the beam)
+static bool gShowSpectrum = true; // MASTER right side: spectrum (true) or the input wave
 // phosphor: the scope traces glow green on a graticule, like the instrument
 static inline ImU32 PH(float a) { return IM_COL32(255, 255, 255, (int)(255 * std::min(1.0f, std::max(0.0f, a)))); }
 static void drawWaveBody(float w) {
@@ -2101,16 +2103,53 @@ static void drawWaveBody(float w) {
     };
     // ── MASTER · Input ──
     {
-        label("MASTER   ·   Input", y);
+        label(gShowSpectrum ? "MASTER   ·   Spectrum" : "MASTER   ·   Input", y);
         float hh = gVecBig ? std::min(w * 0.6f, 330.0f) : 150.0f, top = y + 18;
         const float vs = hh;                       // vectorscope square on the left
         float wx0 = o.x + vs + 10;                 // wave starts where the scope ends
         dl->AddRectFilled(ImVec2(o.x, top), ImVec2(o.x + w, top + hh), IM_COL32(8, 8, 9, 255), 12);
         graticule(wx0 + 4, top + 6, o.x + w - 8, top + hh - 6);
-        {
+        if (gShowSpectrum) {
+            // spectrum, log frequency 20 Hz - 16 kHz, 64 bars with a slow peak line
+            const int bars = 64;
+            static float sm[64] = {0}, pk[64] = {0};
+            const int B = StreamAnalyzer::kSpecBins;
+            const float binHz = 48000.0f / 2.0f / B;            // Hz per ui bin
+            float gx0 = wx0 + 8, gx1 = o.x + w - 12, gw = gx1 - gx0, base = top + hh - 10, gh = hh - 22;
+            float bw = gw / bars;
+            for (int b = 0; b < bars; b++) {
+                float f0 = 20.0f * std::pow(800.0f, b / (float)bars), f1 = 20.0f * std::pow(800.0f, (b + 1) / (float)bars);
+                int i0 = std::max(0, std::min(B - 1, (int)(f0 / binHz))), i1 = std::max(i0 + 1, std::min(B, (int)(f1 / binHz) + 1));
+                float v = 0;
+                for (int i = i0; i < i1; i++) v = std::max(v, gEngine.analyzer.uiSpectrum[i]);
+                v = std::min(1.0f, v * gScopeGain);
+                sm[b] += (v - sm[b]) * (v > sm[b] ? 0.5f : 0.12f);
+                pk[b] = std::max(sm[b], pk[b] - 0.006f);
+                float x0b = gx0 + b * bw + 1.5f, x1b = gx0 + (b + 1) * bw - 1.5f;
+                float hgt = gh * sm[b];
+                dl->AddRectFilled(ImVec2(x0b, base - hgt - 2), ImVec2(x1b, base), PH(0.10f), 2);
+                dl->AddRectFilled(ImVec2(x0b, base - hgt), ImVec2(x1b, base), PH(0.28f + 0.6f * sm[b]), 2);
+                dl->AddLine(ImVec2(x0b, base - gh * pk[b]), ImVec2(x1b, base - gh * pk[b]), PH(0.7f), 1.2f);
+            }
+            if (gFontSmall) ImGui::PushFont(gFontSmall);
+            static const char* fl[5] = {"20", "100", "1k", "10k", "16k"};
+            static const float fv[5] = {20, 100, 1000, 10000, 16000};
+            for (int k = 0; k < 5; k++) {
+                float x = gx0 + gw * std::log(fv[k] / 20.0f) / std::log(800.0f);
+                ImVec2 ts = ImGui::CalcTextSize(fl[k]);
+                dl->AddText(ImVec2(std::min(x - ts.x / 2, gx1 - ts.x), base - 2), PH(0.35f), fl[k]);
+            }
+            if (gFontSmall) ImGui::PopFont();
+        } else {
             // auto-scale the input like the rings, so a quiet song still draws a wave
             float g = gScopeGain * 0.9f / std::max(peakOf(gEngine.scope), 0.02f);
             trace(0, gEngine.scope, wx0 + 8, o.x + w - 12, top + hh / 2, hh * 0.42f, g);
+        }
+        {
+            // the label swaps wave / spectrum
+            ImGui::SetCursorScreenPos(ImVec2(o.x, y - 2));
+            if (ImGui::InvisibleButton("##masterswap", ImVec2(160, 18))) gShowSpectrum = !gShowSpectrum;
+            if (ImGui::IsItemHovered()) ImGui::SetTooltip(gShowSpectrum ? "click: input wave" : "click: spectrum");
         }
         // ── vectorscope: L against R, turned 45° so mono is a vertical line,
         //    width opens it into a cloud; the last ~21 ms of samples ──
@@ -2121,8 +2160,8 @@ static void drawWaveBody(float w) {
             ImGui::SetCursorScreenPos(ImVec2(c.x - r, c.y - r));
             if (ImGui::InvisibleButton("##vecsize", ImVec2(2 * r, 2 * r))) gVecBig = !gVecBig;
             bool vh = ImGui::IsItemHovered();
-            if (vh && ImGui::IsMouseClicked(1)) gVecMode = (gVecMode + 1) % 4;
-            static const char* vecNames[4] = {"L / R", "HEAD x FEET", "HEART x BELLY", "ROOT x FEET"};
+            if (vh && ImGui::IsMouseClicked(1)) gVecMode = (gVecMode + 1) % 5;
+            static const char* vecNames[5] = {"L / R", "HEAD x FEET", "HEART x BELLY", "ROOT x FEET", "FLOATERS"};
             if (vh) { ImGui::SetTooltip("%s\nclick: %s  ·  right-click: next pair", vecNames[gVecMode], gVecBig ? "smaller" : "bigger"); ImGui::SetMouseCursor(ImGuiMouseCursor_Hand); }
             // the screen: a round scope face with graticule rings and axes
             dl->AddCircleFilled(c, r + 4, IM_COL32(4, 4, 5, 255), 64);
@@ -2141,7 +2180,50 @@ static void drawWaveBody(float w) {
             static float vx[Engine::kVecLen], vy[Engine::kVecLen];
             static int vn = 0;
             static float vpk = 0.05f;
-            if (refresh || vn == 0) {
+            if (gVecMode == 4) {
+                // the floaters: each figure's outline is a beam path. The
+                // music makes them wavy — a ripple travels along every
+                // outline, deeper with the bass, and each figure drifts and
+                // breathes on its own, like they're floating in it.
+                float tf = (float)now;
+                float lvl = gEngine.audioLevel.load(), bass = gEngine.audioBass.load();
+                float onset = gEngine.analyzer.out.onsetFlash.load();
+                int o = 0;
+                vn = 0;
+                for (int f = 0; f < kFloaterPaths && vn + kFloaterLen[f] <= Engine::kVecLen; f++) {
+                    int n = kFloaterLen[f];
+                    // centroid, so each figure can breathe and turn about itself
+                    float mx = 0, my = 0;
+                    for (int i = 0; i < n; i++) { mx += kFloaterXY[(o + i) * 2]; my += kFloaterXY[(o + i) * 2 + 1]; }
+                    mx /= n; my /= n;
+                    float ph = tf * 0.35f + f * 2.1f;
+                    float dx = 0.025f * std::sin(ph) + 0.02f * lvl * std::sin(tf * 1.7f + f);
+                    float dy = 0.025f * std::cos(ph * 0.8f) + 0.02f * lvl * std::cos(tf * 1.3f + f);
+                    float rot = 0.06f * std::sin(tf * 0.5f + f * 1.3f) + 0.05f * onset * std::sin(tf * 9.0f + f);
+                    float scale = 0.92f + 0.10f * lvl + 0.06f * onset;
+                    float cr = std::cos(rot), sr = std::sin(rot);
+                    for (int i = 0; i < n; i++) {
+                        int ip = (i - 1 + n) % n, in_ = (i + 1) % n;
+                        float x = kFloaterXY[(o + i) * 2], y = kFloaterXY[(o + i) * 2 + 1];
+                        // outward normal from the neighbours
+                        float tx = kFloaterXY[(o + in_) * 2] - kFloaterXY[(o + ip) * 2];
+                        float ty = kFloaterXY[(o + in_) * 2 + 1] - kFloaterXY[(o + ip) * 2 + 1];
+                        float tl = std::sqrt(tx * tx + ty * ty) + 1e-6f;
+                        float nx = -ty / tl, ny = tx / tl;
+                        // the ripple: two waves running along the outline
+                        float u = i * dsp::kTwoPi / n;
+                        float wav = (0.010f + 0.045f * bass) * std::sin(u * 7.0f - tf * 3.0f + f)
+                                  + (0.006f + 0.030f * lvl) * std::sin(u * 13.0f + tf * 4.5f + f * 0.7f);
+                        x += nx * wav; y += ny * wav;
+                        // breathe + turn about the figure's centre, then drift
+                        float rx = (x - mx) * scale, ry = (y - my) * scale;
+                        x = mx + rx * cr - ry * sr + dx;
+                        y = my + rx * sr + ry * cr + dy;
+                        vx[vn] = x; vy[vn] = y; vn++;
+                    }
+                    o += n;
+                }
+            } else if (refresh || vn == 0) {
                 if (gVecMode == 0) {
                     // input L against R, turned 45° so mono is a vertical line
                     int vw = gEngine.vecW.load(std::memory_order_relaxed);
@@ -2178,16 +2260,28 @@ static void drawWaveBody(float w) {
             }
             // beam: a real CRT spot is brighter where it moves slowly and
             // fades where it whips across, and the oldest samples fade too
-            dl->AddPolyline(vp, vn, PH(0.05f), 0, 6.0f);
-            for (int i = 1; i < vn; i++) {
-                float dx = vp[i].x - vp[i - 1].x, dy = vp[i].y - vp[i - 1].y;
-                float sp = std::sqrt(dx * dx + dy * dy) / r;          // fraction of the radius per sample
-                float bright = 1.0f / (1.0f + sp * 14.0f);
-                float age = 0.35f + 0.65f * i / (float)vn;             // 1 = newest
-                dl->AddLine(vp[i - 1], vp[i], PH((0.25f + 0.75f * bright) * age), 1.3f);
+            if (gVecMode == 4) {
+                // each figure is a closed loop; the beam is blanked between them
+                int o2 = 0;
+                for (int f = 0; f < kFloaterPaths && o2 + kFloaterLen[f] <= vn; f++) {
+                    int n = kFloaterLen[f];
+                    dl->AddPolyline(vp + o2, n, PH(0.06f), ImDrawFlags_Closed, 7.0f);
+                    dl->AddPolyline(vp + o2, n, PH(0.22f), ImDrawFlags_Closed, 3.0f);
+                    dl->AddPolyline(vp + o2, n, PH(0.95f), ImDrawFlags_Closed, 1.2f);
+                    o2 += n;
+                }
+            } else {
+                dl->AddPolyline(vp, vn, PH(0.05f), 0, 6.0f);
+                for (int i = 1; i < vn; i++) {
+                    float dx = vp[i].x - vp[i - 1].x, dy = vp[i].y - vp[i - 1].y;
+                    float sp = std::sqrt(dx * dx + dy * dy) / r;          // fraction of the radius per sample
+                    float bright = 1.0f / (1.0f + sp * 14.0f);
+                    float age = 0.35f + 0.65f * i / (float)vn;             // 1 = newest
+                    dl->AddLine(vp[i - 1], vp[i], PH((0.25f + 0.75f * bright) * age), 1.3f);
+                }
             }
             if (gFontSmall) ImGui::PushFont(gFontSmall);
-            if (gVecMode > 0) { ImVec2 ns = ImGui::CalcTextSize(vecNames[gVecMode]); dl->AddText(ImVec2(c.x - ns.x / 2, c.y + r - 4), PH(0.5f), vecNames[gVecMode]); }
+            if (gVecMode > 0 && gVecMode != 4) { ImVec2 ns = ImGui::CalcTextSize(vecNames[gVecMode]); dl->AddText(ImVec2(c.x - ns.x / 2, c.y + r - 4), PH(0.5f), vecNames[gVecMode]); }
             if (gFontSmall) ImGui::PopFont();
             if (gVecMode == 0) {
                 if (gFontSmall) ImGui::PushFont(gFontSmall);
