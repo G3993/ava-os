@@ -2225,8 +2225,8 @@ static void drawWaveBody(float w) {
                     prev = fig;
                     if (rnd() < 0.20f) { /* stay */ }
                     else { fig = (int)(rnd() * kFigCount) % kFigCount; if (fig == prev) fig = (fig + 1) % kFigCount; }
-                    float base = 1.5f + 2.5f * rnd();
-                    retarget = base / (0.6f + 2.6f * mom);
+                    float base = 0.9f + 1.6f * rnd();
+                    retarget = base / (0.8f + 2.8f * mom);
                     float r2 = rnd();
                     scT = r2 < 0.5f ? std::min(0.88f, sc + 0.03f + 0.05f * rnd())
                         : r2 < 0.8f ? std::max(0.72f, sc - 0.03f - 0.05f * rnd())
@@ -2235,7 +2235,7 @@ static void drawWaveBody(float w) {
                 // the ease: a fraction of the remaining distance per second,
                 // faster with momentum — an exponential glide, so arrivals
                 // are soft and the next departure is already under way
-                float k = 1.0f - std::exp(-dt * (1.6f + 5.0f * mom));
+                float k = 1.0f - std::exp(-dt * (2.6f + 6.0f * mom));
                 sc += (scT - sc) * k * 0.7f;
                 // glitch bands from the sound: on a hit, 1-3 horizontal bands
                 // tear sideways and snap toward the target, healing over ~150 ms
