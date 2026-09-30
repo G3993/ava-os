@@ -2196,9 +2196,16 @@ static void drawWaveBody(float w) {
                 last = now;
                 float lvl = gEngine.audioLevel.load(), bass = gEngine.audioBass.load();
                 float onset = gEngine.analyzer.out.onsetFlash.load();
-                if (hold > 0.0f) hold -= dt;
+                // momentum: the music's intensity, quick to rise and slow to
+                // fall, drives how fast the figure changes and grows — a loud
+                // passage warps at up to ~3.5x, a quiet one drifts
+                static float mom = 0.0f;
+                float momT = std::min(1.0f, lvl * 1.4f + bass * 0.6f + onset * 0.8f);
+                mom += (momT - mom) * (momT > mom ? 0.20f : 0.015f);
+                float speed = 0.55f + 3.0f * mom;
+                if (hold > 0.0f) hold -= dt * speed;
                 else {
-                    phase += dt / dur;
+                    phase += dt / dur * speed;
                     if (phase >= 1.0f) {
                         phase = 0.0f;
                         figA = figB; scA = scB;
