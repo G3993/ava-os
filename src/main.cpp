@@ -2017,6 +2017,7 @@ static bool gVecBig = false;      // vectorscope: small beside the wave, or larg
 static int  gVecMode = 5;         // 0 = input L/R · 1 = HEAD×FEET · 2 = HEART×BELLY · 3 = ROOT×FEET (ring Lissajous) · 4 = FLOATERS (the mark's animation) · 5 = FIGURE (one character warping through shapes)
 static bool gShowSpectrum = false; // MASTER right side: the input wave (default) or the spectrum; click the label
 static int  gAnimLoops = 0, gAnimLoopLen[8];   // the floaters frame on screen: its closed loops
+static float gFigGate = 0.0f;                  // FIGURE: 1 = alive on the input, 0 = faded away in silence
 // phosphor: the scope traces glow green on a graticule, like the instrument
 static inline ImU32 PH(float a) { return IM_COL32(255, 255, 255, (int)(255 * std::min(1.0f, std::max(0.0f, a)))); }
 static void drawWaveBody(float w) {
@@ -2218,10 +2219,18 @@ static void drawWaveBody(float w) {
                 static float mom = 0.0f;
                 float momT = std::min(1.0f, lvl * 1.4f + bass * 0.6f + onset * 0.8f);
                 mom += (momT - mom) * (momT > mom ? 0.20f : 0.015f);
-                // a new target every 1.5-4 s when quiet, 0.4-1.2 s when loud;
+                // the gate: the figure lives on the input. Sound in = it moves;
+                // silence = it stills, then fades away (~1.5 s), and comes back
+                // the moment music returns
+                static float act = 0.0f;
+                act += (lvl - act) * (lvl > act ? 0.25f : 1.0f - std::exp(-dt / 1.2f));
+                float gate = std::min(1.0f, std::max(0.0f, (act - 0.015f) / 0.06f));
+                gFigGate += (gate - gFigGate) * (gate > gFigGate ? 0.15f : 0.04f);
+                float move = gate * (0.35f + 0.65f * std::min(1.0f, lvl * 3.0f));   // how alive it is right now
+                // a new target every 0.9-2.5 s when quiet, faster when loud;
                 // sometimes the same one again (it lingers and breathes)
-                retarget -= dt;
-                if (retarget <= 0.0f) {
+                retarget -= dt * move;
+                if (retarget <= 0.0f && gate > 0.2f) {
                     prev = fig;
                     if (rnd() < 0.20f) { /* stay */ }
                     else { fig = (int)(rnd() * kFigCount) % kFigCount; if (fig == prev) fig = (fig + 1) % kFigCount; }
@@ -2235,20 +2244,20 @@ static void drawWaveBody(float w) {
                 // the ease: a fraction of the remaining distance per second,
                 // faster with momentum — an exponential glide, so arrivals
                 // are soft and the next departure is already under way
-                float k = 1.0f - std::exp(-dt * (2.6f + 6.0f * mom));
+                float k = (1.0f - std::exp(-dt * (2.6f + 6.0f * mom))) * move;
                 sc += (scT - sc) * k * 0.7f;
                 // glitch bands from the sound: on a hit, 1-3 horizontal bands
                 // tear sideways and snap toward the target, healing over ~150 ms
                 static float gT = 0.0f, gY0[3], gY1[3], gDx[3];
                 static int gN = 0;
-                if (onset > 0.35f && gT <= 0.0f && rnd() < 0.7f) {
+                if (onset > 0.35f && gate > 0.3f && gT <= 0.0f && rnd() < 0.7f) {
                     gT = 0.10f + 0.12f * onset;
                     gN = 1 + (int)(rnd() * 3);
                     for (int g = 0; g < gN; g++) { gY0[g] = -0.9f + 1.6f * rnd(); gY1[g] = gY0[g] + 0.06f + 0.25f * rnd(); gDx[g] = (rnd() < 0.5f ? -1.0f : 1.0f) * (0.03f + 0.10f * onset); }
                 }
                 float gA = gT > 0.0f ? std::min(1.0f, gT / 0.12f) : 0.0f;
                 if (gT > 0.0f) gT -= dt;
-                float breathe = 1.0f + 0.012f * std::sin((float)now * 1.4f);
+                float breathe = 1.0f + 0.012f * gate * std::sin((float)now * 1.4f);
                 float swell = sc * breathe * (1.0f + 0.02f * lvl);
                 vn = kFigLen;
                 for (int i = 0; i < kFigLen; i++) {
@@ -2351,13 +2360,15 @@ static void drawWaveBody(float w) {
             // beam: a real CRT spot is brighter where it moves slowly and
             // fades where it whips across, and the oldest samples fade too
             if (gVecMode == 4 || gVecMode == 5) {
-                // each figure is a closed loop; the beam is blanked between them
+                // each figure is a closed loop; the beam is blanked between them.
+                // FIGURE fades with the input gate
+                float ba = gVecMode == 5 ? gFigGate : 1.0f;
                 int o2 = 0;
-                for (int f = 0; f < gAnimLoops && o2 + gAnimLoopLen[f] <= vn; f++) {
+                for (int f = 0; f < gAnimLoops && o2 + gAnimLoopLen[f] <= vn && ba > 0.01f; f++) {
                     int n = gAnimLoopLen[f];
-                    dl->AddPolyline(vp + o2, n, PH(0.06f), ImDrawFlags_Closed, 7.0f);
-                    dl->AddPolyline(vp + o2, n, PH(0.22f), ImDrawFlags_Closed, 3.0f);
-                    dl->AddPolyline(vp + o2, n, PH(0.95f), ImDrawFlags_Closed, 1.2f);
+                    dl->AddPolyline(vp + o2, n, PH(0.06f * ba), ImDrawFlags_Closed, 7.0f);
+                    dl->AddPolyline(vp + o2, n, PH(0.22f * ba), ImDrawFlags_Closed, 3.0f);
+                    dl->AddPolyline(vp + o2, n, PH(0.95f * ba), ImDrawFlags_Closed, 1.2f);
                     o2 += n;
                 }
             } else {
