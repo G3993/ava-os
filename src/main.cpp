@@ -44,6 +44,7 @@ static int runSelfTest();
 
 #ifndef TEMPLE_SELFTEST_ONLY
 #include "imgui.h"
+#include "imgui_internal.h"
 #include "imgui_impl_glfw.h"
 #include "imgui_impl_opengl3.h"
 #include <GLFW/glfw3.h>
@@ -644,24 +645,52 @@ static float velCurve(int v) {
     return 0.30f + 0.70f * std::pow(x, 1.5f);
 }
 
-// a small bead with a lit top edge, and while its zone is on, rings that
-// swell out of it and fade — a drop on water, pulsing at the zone's level
+// a disc shaded by the GPU: one colour at `cc` (the light), another at the
+// rim, interpolated across the triangles — no banding, no visible steps
+static void shadedDisc(ImDrawList* dl, ImVec2 c, float r, ImVec2 cc, ImU32 colCenter, ImU32 colRim, int segs) {
+    dl->PrimReserve(segs * 3, segs + 1);
+    ImVec2 uv = dl->_Data->TexUvWhitePixel;
+    unsigned base = dl->_VtxCurrentIdx;
+    dl->PrimWriteVtx(cc, uv, colCenter);
+    for (int i = 0; i < segs; i++) {
+        float a = i * dsp::kTwoPi / segs;
+        dl->PrimWriteVtx(ImVec2(c.x + r * std::cos(a), c.y + r * std::sin(a)), uv, colRim);
+    }
+    for (int i = 0; i < segs; i++) {
+        dl->PrimWriteIdx((ImDrawIdx)base);
+        dl->PrimWriteIdx((ImDrawIdx)(base + 1 + i));
+        dl->PrimWriteIdx((ImDrawIdx)(base + 1 + (i + 1) % segs));
+    }
+}
+
+// a small glass bead lit from the upper left; while its zone is on it glows
+// like a lamp and rings swell out of it and fade — a drop on water, pulsing
+// at the zone's level
 static void rippleDot(ImDrawList* dl, ImVec2 c, float r, float lvl, float seed) {
     float t = (float)ImGui::GetTime();
+    const int segs = 64;
+    float on = std::min(1.0f, lvl * 1.5f);
     if (lvl > 0.04f) {
+        // lamp glow: a soft halo falling off to nothing
+        shadedDisc(dl, c, r * (3.0f + 3.0f * lvl), c, W(0.30f * on), W(0.0f), segs);
         const int rings = 3;
         for (int j = 0; j < rings; j++) {
             float ph = std::fmod(t * (0.9f + 0.6f * lvl) + seed + j / (float)rings, 1.0f);
             float rr = r + ph * (r * 2.2f + r * 3.5f * lvl);
-            float a = (1.0f - ph) * (1.0f - ph) * (0.45f * std::min(1.0f, lvl * 1.5f));
-            dl->AddCircle(c, rr, W(a), 0, std::max(0.8f, 1.6f * (1.0f - ph)));
+            float a = (1.0f - ph) * (1.0f - ph) * 0.45f * on;
+            dl->AddCircle(c, rr, W(a), segs, std::max(0.8f, 1.6f * (1.0f - ph)));
         }
-        dl->AddCircleFilled(c, r * 1.8f, W(0.16f * lvl), 0);
     }
-    float dg = 0.38f + 0.62f * lvl;
-    dl->AddCircleFilled(ImVec2(c.x, c.y + r * 0.25f), r * 1.05f, IM_COL32(0, 0, 0, 55));   // shadow under
-    dl->AddCircleFilled(c, r, IM_COL32((int)(dg * 255), (int)(dg * 255), (int)(dg * 255), 255));
-    dl->AddCircleFilled(ImVec2(c.x - r * 0.28f, c.y - r * 0.32f), r * 0.42f, W(0.35f + 0.45f * lvl)); // lit top edge
+    // contact shadow under the bead
+    shadedDisc(dl, ImVec2(c.x + r * 0.15f, c.y + r * 0.45f), r * 1.25f, ImVec2(c.x + r * 0.15f, c.y + r * 0.45f),
+               IM_COL32(0, 0, 0, 90), IM_COL32(0, 0, 0, 0), segs);
+    // the sphere: lit from the upper left, dark at the rim
+    ImVec2 light(c.x - r * 0.35f, c.y - r * 0.38f);
+    float hi = 0.55f + 0.45f * on, lo = 0.10f + 0.12f * on;
+    shadedDisc(dl, c, r, light, W(hi), W(lo), segs);
+    // rim light from below right (glass), and a tight specular
+    dl->AddCircle(c, r - 0.5f, W(0.10f + 0.25f * on), segs, 1.0f);
+    shadedDisc(dl, light, r * 0.34f, light, IM_COL32(255, 255, 255, (int)(255 * (0.75f + 0.25f * on))), IM_COL32(255, 255, 255, 0), 32);
 }
 
 static void drawOctagon(ImDrawList* dl, ImVec2 c, float R) {
