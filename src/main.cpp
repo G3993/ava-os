@@ -2165,18 +2165,27 @@ static void drawWaveBody(float w) {
             if (vh && ImGui::IsMouseClicked(1)) gVecMode = (gVecMode + 1) % 6;
             static const char* vecNames[6] = {"L / R", "HEAD x FEET", "HEART x BELLY", "ROOT x FEET", "FLOATERS", "FIGURE"};
             if (vh) { ImGui::SetTooltip("%s\nclick: %s  ·  right-click: next pair", vecNames[gVecMode], gVecBig ? "smaller" : "bigger"); ImGui::SetMouseCursor(ImGuiMouseCursor_Hand); }
-            // the screen: a round scope face with graticule rings and axes
-            dl->AddCircleFilled(c, r + 4, IM_COL32(4, 4, 5, 255), 64);
-            if (vh) dl->AddCircleFilled(c, r, PH(0.03f), 64);
-            for (int k = 1; k <= 4; k++) dl->AddCircle(c, r * k / 4.0f, PH(k == 4 ? 0.18f : 0.07f), 64, 1.0f);
-            dl->AddLine(ImVec2(c.x, c.y - r), ImVec2(c.x, c.y + r), PH(0.16f), 1);
-            dl->AddLine(ImVec2(c.x - r, c.y), ImVec2(c.x + r, c.y), PH(0.16f), 1);
-            dl->AddLine(ImVec2(c.x - r * 0.707f, c.y - r * 0.707f), ImVec2(c.x + r * 0.707f, c.y + r * 0.707f), PH(0.08f), 1);
-            dl->AddLine(ImVec2(c.x - r * 0.707f, c.y + r * 0.707f), ImVec2(c.x + r * 0.707f, c.y - r * 0.707f), PH(0.08f), 1);
-            for (int t = 0; t < 36; t++) {   // bezel ticks every 10°
-                float a = t * dsp::kTwoPi / 36, l0 = t % 9 == 0 ? 0.90f : 0.95f;
-                dl->AddLine(ImVec2(c.x + r * l0 * std::cos(a), c.y + r * l0 * std::sin(a)),
-                            ImVec2(c.x + r * std::cos(a), c.y + r * std::sin(a)), PH(0.16f), 1.0f);
+            // the screen: a single slice of the octagon (its four rings, widest
+            // at the top) in dark grey behind the beam, instead of a round face
+            {
+                // the slice's four rounded trapezoids, from singleslice.svg (700.54 x 467.37)
+                static const float slice[4][4] = {   // top y, top x0..x1, bottom x0..x1 (bottom y = top y + 111)
+                    {  1.50f,   2.55f, 698.00f},
+                    {119.29f,  51.34f, 649.20f},
+                    {237.08f, 100.15f, 600.29f},
+                    {354.87f, 148.79f, 551.53f},
+                };
+                static const float sliceBot[4][2] = {{49.81f, 650.74f}, {98.60f, 601.82f}, {147.49f, 552.90f}, {195.55f, 504.28f}};
+                const float sw = 700.54f, sh = 467.37f;
+                float sc = 2.0f * r * 0.96f / sw;
+                ImVec2 org(c.x - sw * sc / 2, c.y - sh * sc / 2);
+                for (int k = 0; k < 4; k++) {
+                    float ty = slice[k][0], by = ty + 111.0f;
+                    ImVec2 q[4] = {
+                        ImVec2(org.x + slice[k][1] * sc, org.y + ty * sc), ImVec2(org.x + slice[k][2] * sc, org.y + ty * sc),
+                        ImVec2(org.x + sliceBot[k][1] * sc, org.y + by * sc), ImVec2(org.x + sliceBot[k][0] * sc, org.y + by * sc)};
+                    roundedPolyFill(dl, q, 4, 12.0f * sc, IM_COL32(255, 255, 255, vh ? 30 : 22), IM_COL32(255, 255, 255, 40), 1.0f);
+                }
             }
             // the picture: unit-square XY points, refreshed at the scope rate
             static float vx[Engine::kVecLen], vy[Engine::kVecLen];
