@@ -597,6 +597,7 @@ static void hzToNote(float hz, char* out, size_t n) {
 
 // ── system health monitor ──
 static bool gShowHealth = false;
+static bool gShowDeviceNames = false;   // header: output + controller names, behind the green dot
 static int gSweepZone = -1;               // TEST ALL sweep: current zone, <0 idle
 static double gChanLastLive[OutputUnit::kMaxCh] = {0}; // last time signal seen
 static double gHealthScanT = 0;           // periodic device-presence rescan
@@ -1321,46 +1322,104 @@ static void drawTunerBody() {
     double now = glfwGetTime();
     bool anyDrone = false;
     for (int z = 0; z < NZONES; z++) anyDrone |= gTuneDrone[z];
+    const float w = ImGui::GetContentRegionAvail().x;
+    const float x0 = ImGui::GetCursorScreenPos().x;
+    const float cxm = x0 + w / 2;                     // everything hangs off this centre line
 
-    // ── row 1: tunings · LEARN · DRONE ALL / RELEASE · CLEAR MAPS ──
-    for (int t = 0; t < kNumTunings; t++) {
-        if (t) ImGui::SameLine();
-        if (ImGui::SmallButton(kTunings[t].name)) {
-            for (int z = 0; z < NZONES; z++) setZoneHz(z, kTunings[t].hz[z]);
-            gTunerDirtyT = now;
-        }
-        if (ImGui::IsItemHovered()) ImGui::SetTooltip("%s", kTunings[t].note);
-    }
-    ImGui::SameLine(0, 26);
+    // ── row 1, centred: tunings · LEARN · DRONE ALL ──
     {
-        bool lit = gLearnArmed;
-        if (lit) ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(1, 1, 1, 0.22f));
-        const char* lbl = gLearnSel >= 0 ? "MOVE A KNOB..." : (gLearnArmed ? "LEARN: pick a cell" : "LEARN");
-        if (ImGui::SmallButton(lbl)) {
-            gLearnArmed = !gLearnArmed;
-            gLearnSel = -1;
+        const char* learnLbl = gLearnSel >= 0 ? "MOVE A KNOB..." : (gLearnArmed ? "LEARN: pick a cell" : "LEARN");
+        const char* droneLbl = anyDrone ? "RELEASE" : "DRONE ALL";
+        const float padX = ImGui::GetStyle().FramePadding.x * 2, sp = ImGui::GetStyle().ItemSpacing.x;
+        float total = 0;
+        for (int t = 0; t < kNumTunings; t++) total += ImGui::CalcTextSize(kTunings[t].name).x + padX + sp;
+        total += 26 + ImGui::CalcTextSize(learnLbl).x + padX + sp + ImGui::CalcTextSize(droneLbl).x + padX;
+        ImGui::SetCursorPosX(ImGui::GetCursorPosX() + std::max(0.0f, (w - total) / 2));
+        for (int t = 0; t < kNumTunings; t++) {
+            if (t) ImGui::SameLine();
+            if (ImGui::SmallButton(kTunings[t].name)) {
+                for (int z = 0; z < NZONES; z++) setZoneHz(z, kTunings[t].hz[z]);
+                gTunerDirtyT = now;
+            }
+            if (ImGui::IsItemHovered()) ImGui::SetTooltip("%s", kTunings[t].note);
         }
-        if (lit) ImGui::PopStyleColor();
-        if (ImGui::IsItemHovered())
-            ImGui::SetTooltip("arm, click an orb / HZ / LVL cell, then move a knob on your controller");
+        ImGui::SameLine(0, 26);
+        {
+            bool lit = gLearnArmed;
+            if (lit) ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(1, 1, 1, 0.22f));
+            if (ImGui::SmallButton(learnLbl)) { gLearnArmed = !gLearnArmed; gLearnSel = -1; }
+            if (lit) ImGui::PopStyleColor();
+            if (ImGui::IsItemHovered())
+                ImGui::SetTooltip("arm, click an orb / HZ / LVL cell, then move a knob on your controller");
+        }
+        ImGui::SameLine();
+        if (ImGui::SmallButton(droneLbl))
+            for (int z = 0; z < NZONES; z++) setDrone(z, !anyDrone);
     }
-    ImGui::SameLine();
-    if (ImGui::SmallButton(anyDrone ? "RELEASE" : "DRONE ALL"))
-        for (int z = 0; z < NZONES; z++) setDrone(z, !anyDrone);
 
-    // ── ruler canvas ──
-    float w = ImGui::GetContentRegionAvail().x;
+    // ── the body, top and centre: the octagon, each ring numbered like its
+    //    orb, lit as it moves, with a hairline dial of ticks around it ──
+    ImVec2 top = ImGui::GetCursorScreenPos();
+    const float oR = 92.0f;
+    ImVec2 oc(cxm, top.y + 18 + oR);
+    {
+        const int ringZone[4] = {ROOT, BELLY, HEART, HEAD};
+        const float bounds[5] = {0.36f, 0.50f, 0.65f, 0.80f, 0.96f};
+        auto vert = [&](float r, int k) {
+            float a = -dsp::kPi / 2 + dsp::kPi / 8 + k * dsp::kPi / 4;
+            return ImVec2(oc.x + r * oR * std::cos(a), oc.y + r * oR * std::sin(a));
+        };
+        // dial: a faint outer octagon and 8 ticks at its vertices
+        {
+            ImVec2 hair[8];
+            for (int k = 0; k < 8; k++) hair[k] = vert(1.10f, k);
+            dl->AddPolyline(hair, 8, W(0.10f), ImDrawFlags_Closed, 1.0f);
+            for (int k = 0; k < 8; k++) {
+                ImVec2 a = vert(1.10f, k), b = vert(1.16f, k);
+                dl->AddLine(a, b, W(0.28f), 1.0f);
+            }
+        }
+        if (gFontSmall) ImGui::PushFont(gFontSmall);
+        for (int ring = 3; ring >= 0; ring--) {
+            int z = ringZone[ring];
+            float lvl = gEngine.meter[2 + z].load();
+            ImVec2 outer[8], inner[8];
+            for (int k = 0; k < 8; k++) { outer[k] = vert(bounds[ring + 1], k); inner[k] = vert(bounds[ring], k); }
+            dl->AddConvexPolyFilled(outer, 8, W(0.10f + 0.55f * lvl + (gTuneDrone[z] ? 0.25f : 0.0f)));
+            dl->AddConvexPolyFilled(inner, 8, IM_COL32(16, 16, 18, 255));
+            dl->AddPolyline(outer, 8, W(0.06f), ImDrawFlags_Closed, 1.0f);
+            int num = 0;
+            for (int i = 0; i < NZONES; i++) if (kTuneOrder[i] == z) num = i + 1;
+            char b[4]; snprintf(b, sizeof b, "%d", num);
+            float rmid = (bounds[ring] + bounds[ring + 1]) / 2;
+            ImVec2 np(oc.x, oc.y - rmid * oR);
+            ImVec2 ts = ImGui::CalcTextSize(b);
+            dl->AddText(ImVec2(np.x - ts.x / 2, np.y - ts.y / 2), lvl > 0.4f ? IM_COL32(0, 0, 0, 220) : W(0.7f), b);
+        }
+        {
+            float lvl = gEngine.meter[2 + FEET].load();
+            ImVec2 pts[8];
+            for (int k = 0; k < 8; k++) pts[k] = vert(bounds[0], k);
+            dl->AddConvexPolyFilled(pts, 8, W(0.25f + 0.6f * lvl + (gTuneDrone[FEET] ? 0.15f : 0.0f)));
+            ImVec2 ts = ImGui::CalcTextSize("1");
+            dl->AddText(ImVec2(oc.x - ts.x / 2, oc.y - ts.y / 2), IM_COL32(0, 0, 0, 220), "1");
+        }
+        if (gFontSmall) ImGui::PopFont();
+    }
+
+    // ── ruler canvas under the body ──
+    ImGui::SetCursorScreenPos(ImVec2(x0, oc.y + oR * 1.16f + 10));
     ImVec2 o = ImGui::GetCursorScreenPos();
-    const float canvasH = 176.0f;
+    const float canvasH = 160.0f;
     ImGui::InvisibleButton("##ruler", ImVec2(w, canvasH));
     bool canvasHover = ImGui::IsItemHovered();
-    const float pad = 26.0f;
-    float rx0 = o.x + pad, rx1 = o.x + w - pad, rw = rx1 - rx0;
+    const float rulerW = std::min(w - 52.0f, 760.0f);
+    float rx0 = cxm - rulerW / 2, rx1 = cxm + rulerW / 2, rw = rx1 - rx0;
     const float lnRange = std::log(kTuneMax / kTuneMin);
     auto hzX = [&](float hz) { return rx0 + rw * std::log(hz / kTuneMin) / lnRange; };
     auto xHz = [&](float x) { return kTuneMin * std::exp(lnRange * (x - rx0) / rw); };
-    float ry = o.y + 58.0f;   // ruler line
-    float oy = ry + 60.0f;    // orb centre line
+    float ry = o.y + 52.0f;   // ruler line
+    float oy = ry + 58.0f;    // orb centre line
     const float orbR = 15.0f;
 
     // live energy: a bump at each zone's frequency, height = its meter
@@ -1374,7 +1433,7 @@ static void drawTunerBody() {
                 float d = (x - hzX(gTuneHz[z])) / 15.0f;
                 e += gEngine.meter[2 + z].load() * std::exp(-d * d);
             }
-            pts[i] = ImVec2(x, ry - 7.0f - 42.0f * std::min(1.0f, e));
+            pts[i] = ImVec2(x, ry - 7.0f - 40.0f * std::min(1.0f, e));
         }
         dl->AddPolyline(pts, P, W(0.32f), 0, 1.2f);
     }
@@ -1487,83 +1546,56 @@ static void drawTunerBody() {
                     a > 0.55f ? IM_COL32(0, 0, 0, 225) : W(0.92f), num);
     }
 
-    // ── the body: a small octagon, each ring numbered like its orb, lit as it moves ──
-    ImVec2 t0 = ImGui::GetCursorScreenPos();
-    const float tableH = 200.0f;
-    const float octW = 196.0f;
-    {
-        ImVec2 oc(t0.x + octW / 2 - 14, t0.y + tableH / 2);
-        float oR = tableH / 2 - 4;
-        const int ringZone[4] = {ROOT, BELLY, HEART, HEAD};
-        const float bounds[5] = {0.36f, 0.50f, 0.65f, 0.80f, 0.96f};
-        auto vert = [&](float r, int k) {
-            float a = -dsp::kPi / 2 + dsp::kPi / 8 + k * dsp::kPi / 4;
-            return ImVec2(oc.x + r * oR * std::cos(a), oc.y + r * oR * std::sin(a));
-        };
-        if (gFontSmall) ImGui::PushFont(gFontSmall);
-        for (int ring = 3; ring >= 0; ring--) {
-            int z = ringZone[ring];
-            float lvl = gEngine.meter[2 + z].load();
-            ImVec2 outer[8], inner[8];
-            for (int k = 0; k < 8; k++) { outer[k] = vert(bounds[ring + 1], k); inner[k] = vert(bounds[ring], k); }
-            dl->AddConvexPolyFilled(outer, 8, W(0.10f + 0.55f * lvl + (gTuneDrone[z] ? 0.25f : 0.0f)));
-            dl->AddConvexPolyFilled(inner, 8, IM_COL32(16, 16, 18, 255));
-            // ring number where the tuner numbers it (FEET = 1 … HEAD = 5)
-            int num = 0;
-            for (int i = 0; i < NZONES; i++) if (kTuneOrder[i] == z) num = i + 1;
-            char b[4]; snprintf(b, sizeof b, "%d", num);
-            float rmid = (bounds[ring] + bounds[ring + 1]) / 2;
-            ImVec2 np(oc.x, oc.y - rmid * oR);
-            ImVec2 ts = ImGui::CalcTextSize(b);
-            dl->AddText(ImVec2(np.x - ts.x / 2, np.y - ts.y / 2), lvl > 0.4f ? IM_COL32(0, 0, 0, 220) : W(0.7f), b);
-        }
-        {
-            float lvl = gEngine.meter[2 + FEET].load();
-            ImVec2 pts[8];
-            for (int k = 0; k < 8; k++) pts[k] = vert(bounds[0], k);
-            dl->AddConvexPolyFilled(pts, 8, W(0.25f + 0.6f * lvl + (gTuneDrone[FEET] ? 0.15f : 0.0f)));
-            ImVec2 ts = ImGui::CalcTextSize("1");
-            dl->AddText(ImVec2(oc.x - ts.x / 2, oc.y - ts.y / 2), IM_COL32(0, 0, 0, 220), "1");
-        }
-        if (gFontSmall) ImGui::PopFont();
-    }
-    // ── columns: name · Hz · note · DRONE · CC cells ──
-    float colW = (w - octW) / NZONES;
-    t0.y += 50; // columns sit level with the octagon's middle
+    // ── readouts, centred: five columns, each centred on its own axis ──
+    const float tableW = std::min(w, 5 * 150.0f), colW = tableW / NZONES;
+    ImVec2 t0(cxm - tableW / 2, o.y + canvasH + 12);
+    const float tableH = 118.0f;
+    auto centred = [&](const char* s, float cx, float y, ImU32 col) {
+        ImVec2 ts = ImGui::CalcTextSize(s);
+        dl->AddText(ImVec2(cx - ts.x / 2, y), col, s);
+        return ts;
+    };
     for (int i = 0; i < NZONES; i++) {
         int z = kTuneOrder[i];
-        float cx = t0.x + octW + colW * i;
-        if (i) dl->AddLine(ImVec2(cx - 8, t0.y + 2), ImVec2(cx - 8, t0.y + tableH - 8), W(0.07f), 1.0f);
+        float cl = t0.x + colW * i, cx = cl + colW / 2;
+        if (i) dl->AddLine(ImVec2(cl, t0.y + 4), ImVec2(cl, t0.y + tableH - 8), W(0.07f), 1.0f);
         char buf[48];
         if (gFontSmall) ImGui::PushFont(gFontSmall);
         snprintf(buf, sizeof(buf), "%d  %s", i + 1, kZoneNames[z]);
-        dl->AddText(ImVec2(cx, t0.y), W(0.38f), buf);
+        centred(buf, cx, t0.y, W(0.38f));
         if (gFontSmall) ImGui::PopFont();
         bool hzFlash = now - gCcFlashT[z][0] < 0.15;
         snprintf(buf, sizeof(buf), "%.2f", gTuneHz[z]);
-        dl->AddText(ImVec2(cx, t0.y + 16), W(hzFlash ? 1.0f : 0.92f), buf);
-        if (gFontSmall) ImGui::PushFont(gFontSmall);
         ImVec2 hs = ImGui::CalcTextSize(buf);
-        dl->AddText(ImVec2(cx + hs.x * 1.25f + 6, t0.y + 20), W(0.35f), "Hz");
+        if (gFontSmall) ImGui::PushFont(gFontSmall);
+        ImVec2 us = ImGui::CalcTextSize("Hz");
+        if (gFontSmall) ImGui::PopFont();
+        float hx = cx - (hs.x + 6 + us.x) / 2;
+        dl->AddText(ImVec2(hx, t0.y + 16), W(hzFlash ? 1.0f : 0.92f), buf);
+        if (gFontSmall) ImGui::PushFont(gFontSmall);
+        dl->AddText(ImVec2(hx + hs.x + 6, t0.y + 20), W(0.35f), "Hz");
         hzToNote(gTuneHz[z], buf, sizeof(buf));
-        dl->AddText(ImVec2(cx, t0.y + 38), W(0.5f), buf);
+        centred(buf, cx, t0.y + 38, W(0.5f));
         if (gFontSmall) ImGui::PopFont();
 
-        // DRONE toggle
-        ImGui::SetCursorScreenPos(ImVec2(cx, t0.y + 58));
+        // DRONE toggle, centred
         ImGui::PushID(z);
+        const float padX = ImGui::GetStyle().FramePadding.x * 2;
+        float bw = ImGui::CalcTextSize("DRONE").x + padX;
+        ImGui::SetCursorScreenPos(ImVec2(cx - bw / 2, t0.y + 58));
         bool litD = gTuneDrone[z];
         if (litD) ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(1, 1, 1, 0.28f));
         if (ImGui::SmallButton("DRONE")) setDrone(z, !gTuneDrone[z]);
         if (litD) ImGui::PopStyleColor();
 
-        // CC cells: in LEARN mode they arm, otherwise they show the binding
-        ImGui::SameLine(0, 6);
+        // CC cells under it: in LEARN mode they arm, otherwise they show the binding
         if (gFontSmall) ImGui::PushFont(gFontSmall);
         int ccHz = -1, ccLv = -1;
         for (auto& m : gCcMaps)
             if (m.zone == z) (m.target == 0 ? ccHz : ccLv) = m.cc;
         if (gLearnArmed) {
+            float bw2 = ImGui::CalcTextSize("HZ").x + ImGui::CalcTextSize("LVL").x + 2 * padX + 3;
+            ImGui::SetCursorScreenPos(ImVec2(cx - bw2 / 2, t0.y + 84));
             bool armHz = gLearnSel == z, armLv = gLearnSel == z + NZONES;
             if (armHz) ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(1, 1, 1, 0.3f));
             if (ImGui::SmallButton("HZ")) gLearnSel = z;
@@ -1573,25 +1605,19 @@ static void drawTunerBody() {
             if (ImGui::SmallButton("LVL")) gLearnSel = z + NZONES;
             if (armLv) ImGui::PopStyleColor();
         } else {
-            ImVec2 cp = ImGui::GetCursorScreenPos();
             bool lvFlash = now - gCcFlashT[z][1] < 0.15;
-            if (ccHz >= 0) snprintf(buf, sizeof(buf), "CC%d", ccHz); else snprintf(buf, sizeof(buf), "%s", "");
-            dl->AddText(ImVec2(cp.x, cp.y + 4), W(hzFlash ? 0.95f : 0.45f), buf);
-            if (ccLv >= 0) {
-                snprintf(buf, sizeof(buf), "L CC%d", ccLv);
-                dl->AddText(ImVec2(cp.x, cp.y + 17), W(lvFlash ? 0.95f : 0.45f), buf);
-            }
-            ImGui::Dummy(ImVec2(60, 10));
+            if (ccHz >= 0) { snprintf(buf, sizeof(buf), "CC%d", ccHz); centred(buf, cx, t0.y + 88, W(hzFlash ? 0.95f : 0.45f)); }
+            if (ccLv >= 0) { snprintf(buf, sizeof(buf), "L CC%d", ccLv); centred(buf, cx, t0.y + 101, W(lvFlash ? 0.95f : 0.45f)); }
         }
         if (gFontSmall) ImGui::PopFont();
         ImGui::PopID();
     }
-    ImGui::SetCursorScreenPos(ImVec2(t0.x, t0.y + tableH - 50 + 8));
+    ImGui::SetCursorScreenPos(ImVec2(x0, t0.y + tableH + 6));
 
     if (gFontSmall) ImGui::PushFont(gFontSmall);
-    ImGui::TextDisabled("drag an orb to tune  ·  right-click holds it  ·  esc lets go");
+    centred("drag an orb to tune  ·  right-click holds it  ·  esc lets go", cxm, ImGui::GetCursorScreenPos().y, W(0.35f));
     if (gFontSmall) ImGui::PopFont();
-
+    ImGui::Dummy(ImVec2(0, 16));
 }
 
 // drawn inline inside the ARTIFACT panel (MIDI sub-tab): controller in, octagon out
@@ -1875,6 +1901,8 @@ static float drawShaderPreviewCentered(ImDrawList* dl, ImVec2 o, float w, float 
 static float gScopeZoom = 1.5f;   // 1 = the whole 340 ms buffer, 8 = the last ~40 ms
 static float gScopeGain = 1.0f;
 static bool gVecBig = false;      // vectorscope: small beside the wave, or large
+// phosphor: the scope traces glow green on a graticule, like the instrument
+static inline ImU32 PH(float a) { return IM_COL32(120, 255, 170, (int)(255 * std::min(1.0f, std::max(0.0f, a)))); }
 static void drawWaveBody(float w) {
     ImDrawList* dl = ImGui::GetWindowDrawList();
     ImVec2 o = ImGui::GetCursorScreenPos();
@@ -1901,8 +1929,29 @@ static void drawWaveBody(float w) {
             float v = sampleAt(buf, i) * gain;
             pts[i] = ImVec2(x0 + (x1 - x0) * i / (float)(P - 1), mid - amp * std::max(-1.0f, std::min(1.0f, v)));
         }
-        dl->AddPolyline(pts, P, glow, 0, 4.0f);
-        dl->AddPolyline(pts, P, line, 0, 1.6f);
+        (void)glow; (void)line;
+        dl->AddPolyline(pts, P, PH(0.10f), 0, 7.0f);
+        dl->AddPolyline(pts, P, PH(0.28f), 0, 3.0f);
+        dl->AddPolyline(pts, P, PH(0.95f), 0, 1.2f);
+    };
+    // graticule: a dotted grid, 8 divisions across and 4 tall, like a scope screen
+    auto graticule = [&](float gx0, float gy0, float gx1, float gy1) {
+        dl->AddRectFilled(ImVec2(gx0, gy0), ImVec2(gx1, gy1), IM_COL32(6, 10, 8, 255), 6);
+        float gw = gx1 - gx0, gh = gy1 - gy0;
+        int nx = std::max(4, (int)(gw / 40)), ny = std::max(2, (int)(gh / 40));
+        for (int i = 1; i < nx; i++) {
+            float x = gx0 + gw * i / nx;
+            dl->AddLine(ImVec2(x, gy0), ImVec2(x, gy1), PH(i == nx / 2 ? 0.14f : 0.06f), 1.0f);
+        }
+        for (int j = 1; j < ny; j++) {
+            float yy = gy0 + gh * j / ny;
+            dl->AddLine(ImVec2(gx0, yy), ImVec2(gx1, yy), PH(j == ny / 2 ? 0.14f : 0.06f), 1.0f);
+        }
+        // fine ticks on the centre lines
+        float cy = gy0 + gh / 2, cx = gx0 + gw / 2;
+        for (int i = 1; i < nx * 5; i++) { float x = gx0 + gw * i / (nx * 5); dl->AddLine(ImVec2(x, cy - 2), ImVec2(x, cy + 2), PH(0.12f), 1.0f); }
+        for (int j = 1; j < ny * 5; j++) { float yy = gy0 + gh * j / (ny * 5); dl->AddLine(ImVec2(cx - 2, yy), ImVec2(cx + 2, yy), PH(0.12f), 1.0f); }
+        dl->AddRect(ImVec2(gx0, gy0), ImVec2(gx1, gy1), PH(0.16f), 6);
     };
     // ── MASTER · Input ──
     {
@@ -1911,7 +1960,7 @@ static void drawWaveBody(float w) {
         const float vs = hh;                       // vectorscope square on the left
         float wx0 = o.x + vs + 10;                 // wave starts where the scope ends
         dl->AddRectFilled(ImVec2(o.x, top), ImVec2(o.x + w, top + hh), IM_COL32(8, 8, 9, 255), 12);
-        dl->AddLine(ImVec2(wx0 + 8, top + hh / 2), ImVec2(o.x + w - 12, top + hh / 2), W(0.06f), 1);
+        graticule(wx0 + 4, top + 6, o.x + w - 8, top + hh - 6);
         {
             // auto-scale the input like the rings, so a quiet song still draws a wave
             float pk = 1e-3f;
@@ -1929,16 +1978,28 @@ static void drawWaveBody(float w) {
             if (ImGui::InvisibleButton("##vecsize", ImVec2(2 * r, 2 * r))) gVecBig = !gVecBig;
             bool vh = ImGui::IsItemHovered();
             if (vh) { ImGui::SetTooltip(gVecBig ? "click: smaller" : "click: bigger"); ImGui::SetMouseCursor(ImGuiMouseCursor_Hand); }
-            if (vh) dl->AddCircleFilled(c, r, W(0.03f), 48);
-            dl->AddLine(ImVec2(c.x, c.y - r), ImVec2(c.x, c.y + r), W(0.10f), 1);
-            dl->AddLine(ImVec2(c.x - r, c.y), ImVec2(c.x + r, c.y), W(0.10f), 1);
-            dl->AddLine(ImVec2(c.x - r * 0.707f, c.y - r * 0.707f), ImVec2(c.x + r * 0.707f, c.y + r * 0.707f), W(0.06f), 1);
-            dl->AddLine(ImVec2(c.x - r * 0.707f, c.y + r * 0.707f), ImVec2(c.x + r * 0.707f, c.y - r * 0.707f), W(0.06f), 1);
-            dl->AddCircle(c, r, W(0.10f), 48, 1.0f);
+            // the screen: a round scope face with graticule rings and axes
+            dl->AddCircleFilled(c, r + 4, IM_COL32(6, 10, 8, 255), 64);
+            if (vh) dl->AddCircleFilled(c, r, PH(0.03f), 64);
+            for (int k = 1; k <= 4; k++) dl->AddCircle(c, r * k / 4.0f, PH(k == 4 ? 0.18f : 0.07f), 64, 1.0f);
+            dl->AddLine(ImVec2(c.x, c.y - r), ImVec2(c.x, c.y + r), PH(0.16f), 1);
+            dl->AddLine(ImVec2(c.x - r, c.y), ImVec2(c.x + r, c.y), PH(0.16f), 1);
+            dl->AddLine(ImVec2(c.x - r * 0.707f, c.y - r * 0.707f), ImVec2(c.x + r * 0.707f, c.y + r * 0.707f), PH(0.08f), 1);
+            dl->AddLine(ImVec2(c.x - r * 0.707f, c.y + r * 0.707f), ImVec2(c.x + r * 0.707f, c.y - r * 0.707f), PH(0.08f), 1);
+            for (int t = 0; t < 36; t++) {   // bezel ticks every 10°
+                float a = t * dsp::kTwoPi / 36, l0 = t % 9 == 0 ? 0.90f : 0.95f;
+                dl->AddLine(ImVec2(c.x + r * l0 * std::cos(a), c.y + r * l0 * std::sin(a)),
+                            ImVec2(c.x + r * std::cos(a), c.y + r * std::sin(a)), PH(0.16f), 1.0f);
+            }
             int vw = gEngine.vecW.load(std::memory_order_relaxed);
             const int VN = Engine::kVecLen;
             static ImVec2 vp[Engine::kVecLen];
-            float g = gScopeGain * 1.4f;
+            // auto-gain like the waves: the cloud fills the screen at any level
+            static float vpk = 0.05f;
+            float pk = 1e-3f;
+            for (int i = 0; i < VN; i++) pk = std::max(pk, std::max(std::fabs(gEngine.vecL[i]), std::fabs(gEngine.vecR[i])));
+            vpk += (pk - vpk) * (pk > vpk ? 0.5f : 0.03f);
+            float g = gScopeGain * 0.85f / std::max(vpk, 0.02f);
             for (int i = 0; i < VN; i++) {
                 int k = (vw + i) % VN;
                 float l = gEngine.vecL[k] * g, rr = gEngine.vecR[k] * g;
@@ -1947,11 +2008,20 @@ static void drawWaveBody(float w) {
                 if (m > 1.0f) { x /= m; yv /= m; }
                 vp[i] = ImVec2(c.x + x * r, c.y - yv * r);
             }
-            dl->AddPolyline(vp, VN, W(0.10f), 0, 2.5f);
-            dl->AddPolyline(vp, VN, W(0.55f), 0, 1.0f);
+            // persistence: the trace is drawn in 4 age bands, the oldest faintest,
+            // each with a soft glow under a thin bright beam
+            const int bands = 4, per = VN / bands;
+            for (int b = 0; b < bands; b++) {
+                float age = (b + 1) / (float)bands;           // 1 = newest
+                int i0 = b * per, cnt = (b == bands - 1 ? VN - i0 : per + 1);
+                cnt = std::min(cnt, VN - i0);
+                dl->AddPolyline(vp + i0, cnt, PH(0.06f * age), 0, 6.0f);
+                dl->AddPolyline(vp + i0, cnt, PH(0.22f * age), 0, 2.5f);
+                dl->AddPolyline(vp + i0, cnt, PH(0.30f + 0.65f * age), 0, 1.0f);
+            }
             if (gFontSmall) ImGui::PushFont(gFontSmall);
-            dl->AddText(ImVec2(c.x - r - 2, c.y + r - 4), W(0.25f), "L");
-            dl->AddText(ImVec2(c.x + r - 6, c.y + r - 4), W(0.25f), "R");
+            dl->AddText(ImVec2(c.x - r - 2, c.y + r - 4), PH(0.45f), "L");
+            dl->AddText(ImVec2(c.x + r - 6, c.y + r - 4), PH(0.45f), "R");
             if (gFontSmall) ImGui::PopFont();
         }
         y = top + hh + 18;
@@ -1975,7 +2045,7 @@ static void drawWaveBody(float w) {
             float ly = top + z * (lane + laneGap), mid = ly + lane / 2, amp = lane * 0.42f;
             float lvl = gEngine.meter[2 + z].load();
             dl->AddRectFilled(ImVec2(o.x, ly), ImVec2(o.x + w, ly + lane), IM_COL32(8, 8, 9, 255), 10);
-            dl->AddLine(ImVec2(o.x + 72, mid), ImVec2(o.x + w - 12, mid), W(0.05f), 1);
+            graticule(o.x + 68, ly + 4, o.x + w - 8, ly + lane - 4);
             // auto-scale each ring to its own recent peak so every lane draws a full wave
             float pk = 1e-3f;
             for (int i = 0; i < span; i++) pk = std::max(pk, std::fabs(gEngine.vibScope[z][(first + i) % N]));
@@ -2150,10 +2220,10 @@ static void drawShadersBody(float w) {
         // × in the corner while hovered: delete without the menu
         if (h && shaderId >= 0) {
             ImVec2 xc(p1.x - 14, p0.y + 14);
-            ImGui::SetCursorScreenPos(ImVec2(xc.x - 10, xc.y - 10));
-            char xid[32]; snprintf(xid, sizeof xid, "%s_x", id);
-            if (ImGui::InvisibleButton(xid, ImVec2(20, 20))) { deleteId = shaderId; pressed = false; }
-            bool xh = ImGui::IsItemHovered();
+            // a hit-test, not a button: a button here would move the layout cursor
+            // and the next tile would land on this row (the pile-up while scrolling)
+            bool xh = ImGui::IsMouseHoveringRect(ImVec2(xc.x - 10, xc.y - 10), ImVec2(xc.x + 10, xc.y + 10));
+            if (xh && ImGui::IsMouseReleased(0)) { deleteId = shaderId; pressed = false; }
             dl->AddCircleFilled(xc, 9, IM_COL32(0, 0, 0, xh ? 230 : 160));
             dl->AddLine(ImVec2(xc.x - 3.5f, xc.y - 3.5f), ImVec2(xc.x + 3.5f, xc.y + 3.5f), W(xh ? 1.0f : 0.8f), 1.5f);
             dl->AddLine(ImVec2(xc.x - 3.5f, xc.y + 3.5f), ImVec2(xc.x + 3.5f, xc.y - 3.5f), W(xh ? 1.0f : 0.8f), 1.5f);
@@ -2676,20 +2746,6 @@ static void drawOctagonLauncher(ImDrawList* dl, ImVec2 c, float R) {
             float isz = std::max(16.0f, R * 0.075f);
             ImU32 icol = play > 0.0f ? IM_COL32(0, 0, 0, 230) : W(hov || armed ? 0.95f : 0.72f);
             if (icon >= 0) drawIcon(dl, icon, ctr, isz, icol);
-            // the key that plays this slice, tucked in the slice's outer corner
-            {
-                int row = -1;
-                for (int r = 0; r < 4; r++) if (kKeyRowRing[r] == ring) row = r;
-                if (row >= 0) {
-                    if (gFontSmall) ImGui::PushFont(gFontSmall);
-                    const char* kl = kKeyRowLabels[row][k];
-                    ImVec2 ks = ImGui::CalcTextSize(kl);
-                    ImVec2 kp(ctr.x - ks.x / 2, ctr.y + isz * 0.62f);
-                    bool kd = gKeyDown[row][k];
-                    dl->AddText(kp, play > 0.0f ? IM_COL32(0, 0, 0, 170) : W(kd ? 0.95f : 0.30f), kl);
-                    if (gFontSmall) ImGui::PopFont();
-                }
-            }
             if (hov) {
                 const char* nm = sl.kind == 0 ? kPadPatches[sl.idx].name : gVfx[sl.idx].name;
                 const char* ht = sl.kind == 0 ? kPadPatches[sl.idx].hint : gVfx[sl.idx].hint;
@@ -2716,8 +2772,6 @@ static void drawOctagonLauncher(ImDrawList* dl, ImVec2 c, float R) {
         if (gFontSmall) ImGui::PushFont(gFontSmall);
         ImVec2 ts = ImGui::CalcTextSize(kPadPatches[cur].name);
         dl->AddText(ImVec2(c.x - ts.x / 2, c.y + R * 0.09f), IM_COL32(0, 0, 0, 170), kPadPatches[cur].name);
-        ImVec2 ss = ImGui::CalcTextSize("space");
-        dl->AddText(ImVec2(c.x - ss.x / 2, c.y + R * 0.09f + 15), IM_COL32(0, 0, 0, gKeySpace ? 220 : 90), "space");
         if (gFontSmall) ImGui::PopFont();
         if (hov) {
             ImGui::SetTooltip("%s through every ring", kPadPatches[cur].name);
@@ -3134,6 +3188,20 @@ int main(int argc, char** argv) {
                 // ── RINGS: solo one to find it by feel ──
                 head("RINGS");
                 {
+                    // STEREO: the centre (feet) has no side of its own; pick one
+                    int sc = gEngine.params.stereoCenter.load();
+                    ImGui::TextDisabled("STEREO centre");
+                    ImGui::SameLine(120);
+                    if (sc == 0) ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(1, 1, 1, 0.28f));
+                    if (ImGui::SmallButton("LEFT")) gEngine.params.stereoCenter.store(0);
+                    if (sc == 0) ImGui::PopStyleColor();
+                    ImGui::SameLine();
+                    if (sc == 1) ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(1, 1, 1, 0.28f));
+                    if (ImGui::SmallButton("RIGHT")) gEngine.params.stereoCenter.store(1);
+                    if (sc == 1) ImGui::PopStyleColor();
+                    if (ImGui::IsItemHovered()) ImGui::SetTooltip("which side of the image the centre pad follows in STEREO mode");
+                }
+                {
                     int solo = gEngine.params.soloZone.load();
                     for (int i = 0; i < NZONES; i++) {
                         int z = kTuneOrder[i]; // 1 = FEET … 5 = HEAD, matching the tuner
@@ -3225,13 +3293,13 @@ int main(int argc, char** argv) {
         float octR = std::min(leftW, H_) * 0.39f;
         // engine mode, centred above the octagon: SYNTH · SPLIT · MONO · STEREO · SURROUND
         {
-            static const char* modes[5] = {"SYNTH", "SPLIT", "MONO", "STEREO", "SURROUND"};
+            static const char* modes[5] = {"SYNTH", "SPLIT", "MONO", "STEREO", "SPATIAL"};
             static const char* modeTips[5] = {
                 "SYNTH: one root note, five mixes of it. The original engine.",
                 "SPLIT: feet = sub, root = bass line, belly = drums,\nheart = vocal/chord melody, head = lead/air melody. Five layers at once.",
                 "MONO: the song itself, felt. Its low end to every zone,\nbass exaggerated x2, plus an octave-down copy of bass the rings can't move.",
-                "STEREO: MONO split left / right. Send 1 = left side, send 2 = right side\nof each ring (low-end width x2); the feet stay mono.",
-                "SURROUND: 3 channels. Head+heart = the voice, belly+root = bass line + drums,\nfeet = LFE sub (+10 dB). A head-to-toe roll fires only on a clear bass drop."};
+                "STEREO: MONO split left / right across the bed. Head + belly feel the left\nlow end, heart + root the right (width x2); the centre takes one side\n(Settings > RINGS).",
+                "SPATIAL: the mix placed on the body. Left of the image on head + belly, right on\nheart + root, the voice up top, bass line + drums low, the sub in the feet.\nA head-to-toe roll fires only on a clear bass drop."};
             int em = gEngine.params.engineMode.load();
             const float gap = 22;
             float total = 0;
@@ -3369,7 +3437,7 @@ int main(int argc, char** argv) {
                         snprintf(id2m, sizeof(id2m), "-##z2%d", z);
                         snprintf(id2p, sizeof(id2p), "+##z2%d", z);
                         ImGui::SameLine();
-                        ImGui::TextDisabled(gEngine.params.engineMode.load() == 3 ? "R" : "+");
+                        ImGui::TextDisabled("+");
                         ImGui::SameLine();
                         if (ImGui::SmallButton(id2m))
                             gEngine.params.zoneChan2[z].store(c2 <= -1 ? -1 : c2 - 1);
@@ -3701,14 +3769,16 @@ int main(int argc, char** argv) {
         //    The whole cluster is a button: click it for the SYSTEM HEALTH window ──
         {
             {
-                // "Settings": a word, not a cluster of icons
-                ImVec2 ts = ImGui::CalcTextSize("Settings");
-                ImVec2 b0(leftW - 40 - ts.x - 12, 28);
+                // Settings: a hamburger, no word
+                ImVec2 b0(leftW - 40 - 28, 28);
                 ImGui::SetCursorScreenPos(b0);
-                if (ImGui::InvisibleButton("##healthbtn", ImVec2(ts.x + 24, 28))) gShowHealth = !gShowHealth;
+                if (ImGui::InvisibleButton("##healthbtn", ImVec2(28, 28))) gShowHealth = !gShowHealth;
                 bool hh = ImGui::IsItemHovered();
-                if (hh || gShowHealth) dl->AddRectFilled(b0, ImVec2(b0.x + ts.x + 24, 56), W(gShowHealth ? 0.10f : 0.05f), 14);
-                dl->AddText(ImVec2(b0.x + 12, 42 - ts.y / 2), W(gShowHealth ? 0.95f : (hh ? 0.8f : 0.5f)), "Settings");
+                if (hh) ImGui::SetTooltip("Settings");
+                if (hh || gShowHealth) dl->AddRectFilled(b0, ImVec2(b0.x + 28, 56), W(gShowHealth ? 0.10f : 0.05f), 14);
+                ImU32 hc = W(gShowHealth ? 0.95f : (hh ? 0.8f : 0.5f));
+                for (int l = -1; l <= 1; l++)
+                    dl->AddLine(ImVec2(b0.x + 7, 42 + l * 5.0f), ImVec2(b0.x + 21, 42 + l * 5.0f), hc, 1.5f);
             }
 #ifdef __APPLE__
             // live-input guard / clip flag: the one thing worth shouting about
@@ -3730,13 +3800,15 @@ int main(int argc, char** argv) {
             {
                 // sound coming in: one green dot
                 bool signal = gTap.running() && gTap.inputPeak.load() > 0.003f;
-                ImVec2 dp(leftW - 130, 42);
+                ImVec2 dp(leftW - 100, 42);
                 if (signal) dl->AddCircleFilled(dp, 9, IM_COL32(80, 220, 120, 45));
                 dl->AddCircleFilled(dp, 4.5f, signal ? IM_COL32(80, 220, 120, 255) : W(0.20f));
-                if (ImGui::IsMouseHoveringRect(ImVec2(dp.x - 10, dp.y - 10), ImVec2(dp.x + 10, dp.y + 10)))
-                    ImGui::SetTooltip(signal ? "hearing your music"
+                ImGui::SetCursorScreenPos(ImVec2(dp.x - 10, dp.y - 10));
+                if (ImGui::InvisibleButton("##sigdot", ImVec2(20, 20))) gShowDeviceNames = !gShowDeviceNames;
+                if (ImGui::IsItemHovered())
+                    ImGui::SetTooltip(signal ? "hearing your music  ·  click for the devices"
                                       : gTapState.load() == 1 ? "waiting for the Mac's audio system"
-                                      : "no music playing on this Mac");
+                                      : "no music playing on this Mac  ·  click for the devices");
             }
 #ifdef __APPLE__
             // MIDI: the controller's name while one is plugged in, flashing on
@@ -3749,12 +3821,15 @@ int main(int argc, char** argv) {
                 if (oact != gOutActPrev) { gOutActPrev = oact; gOutFlashT = now; }
                 bool conn = gMidi.connected();
                 bool flash = now - gMidiActFlashT < 0.12 || now - gOutFlashT < 0.12;
-                if (conn) {
-                    std::string nm = gMidi.deviceName();
-                    if (nm.size() > 22) nm = nm.substr(0, 22);
+                // the names stay hidden until the green dot is clicked: output
+                // device, then the controller (flashing on every note in or out)
+                if (gShowDeviceNames) {
+                    std::string nm = gOut.running() && gSelDevice >= 0 && gSelDevice < (int)gDevices.size() ? gDevices[gSelDevice].name : std::string("no output");
+                    if (conn) nm += "   ·   " + gMidi.deviceName();
+                    if (nm.size() > 48) nm = nm.substr(0, 48);
                     if (gFontSmall) ImGui::PushFont(gFontSmall);
                     ImVec2 ts = ImGui::CalcTextSize(nm.c_str());
-                    dl->AddText(ImVec2(leftW - 150 - ts.x, 42 - ts.y / 2), W(flash ? 0.95f : 0.45f), nm.c_str());
+                    dl->AddText(ImVec2(leftW - 120 - ts.x, 42 - ts.y / 2), W(flash ? 0.95f : 0.45f), nm.c_str());
                     if (gFontSmall) ImGui::PopFont();
                 }
             }

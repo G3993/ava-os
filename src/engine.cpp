@@ -176,9 +176,11 @@ void Engine::process(const float* inL, const float* inR, float** out, int n) {
     const int fxChokeOn = params.fxChoke.load();
     const int  mode = params.engineMode.load();
     const bool synthMode  = mode == 0;
-    const bool splitMode  = mode == 1 || mode == 4;   // BODY builds on the SPLIT layers
-    const bool stereoMode = mode == 3 && n <= kMaxBlock;
-    stereoOut_ = stereoMode;
+    const bool splitMode  = mode == 1 || mode == 4;   // SPATIAL builds on the SPLIT layers
+    // STEREO now lands on whole rings (one send each), so no second output
+    const bool stereoMode = false;
+    stereoOut_ = false;
+    const int stereoCenter = params.stereoCenter.load();
     // bass drop: sub quiet (< 0.25 of its max) for 1.5 s, then a hit that
     // brings it above 0.75 — the drop. At most one effect every 8 s.
     const long dropRefracLen = (long)(8.0f * kSR);
@@ -560,28 +562,36 @@ void Engine::process(const float* inL, const float* inR, float** out, int n) {
                 float lowFeet = lowBandL_.process(monoFeet);      // own filter state for the feet tap
                 float bassX = bassSig + subSig;                    // 8-80 Hz, once more = x2
                 for (int z = 0; z < NZONES; z++) mix[z] = (z == FEET ? lowFeet : lowRing) + bassX + subh * 0.9f;
-            } else if (mode == 3) {
-                // STEREO: left / right low end with the low-end width doubled
-                // (bass is nearly mono in most mixes; x2 side makes a pan felt)
+            } else {
+                // left / right low end with the low-end width doubled (bass is
+                // nearly mono in most mixes; x2 side makes a pan felt)
                 float mid = 0.5f * (lowL + lowR), side = 0.5f * (lowL - lowR);
                 float lL = lowBandL_.process(mid + 2.0f * side);
                 float lR = lowBandR_.process(mid - 2.0f * side);
                 float bassX = bassSig + subSig;
-                float lowFeet = lowBandM_.process(monoFeet);
-                for (int z = 0; z < NZONES; z++) {
-                    if (z == FEET) { mix[z] = mixR[z] = lowFeet + bassX + subh * 0.9f; }
-                    else { mix[z] = lL + 0.5f * bassX + subh * 0.7f; mixR[z] = lR + 0.5f * bassX + subh * 0.7f; }
+                // the rings alternate sides top to bottom; the centre pad picks one
+                const bool leftRing[NZONES] = {true, false, true, false, stereoCenter == 0};
+                if (mode == 3) {
+                    // STEREO: the song's low end, by side, on whole rings
+                    float lowFeet = lowBandM_.process(monoFeet);
+                    for (int z = 0; z < NZONES; z++) {
+                        float sideLow = leftRing[z] ? lL : lR;
+                        mix[z] = z == FEET ? 0.5f * (lowFeet + sideLow) + bassX + subh * 0.9f
+                                           : sideLow + 0.5f * bassX + subh * 0.7f;
+                    }
+                } else {
+                    // SPATIAL: the mix placed on the body. Side from the stereo
+                    // image, height from the layer: voice up top, bass line +
+                    // drums low, the sub in the feet (+10 dB, bass-managed)
+                    float voice = split[HEAD] * 0.9f;                       // voice + snare
+                    float low   = split[ROOT] * 0.8f + split[BELLY] * 0.8f; // bass line, low instruments, kick
+                    float lfe   = subSig * 3.16f * 3.2f + subh * 0.8f;
+                    mix[HEAD]  = voice + 0.45f * lL;
+                    mix[HEART] = voice + 0.45f * lR;
+                    mix[BELLY] = low + 0.45f * lL;
+                    mix[ROOT]  = low + 0.45f * lR;
+                    mix[FEET]  = lfe;
                 }
-            } else {
-                // BODY: 3 channels. Centre = the voice on HEAD+HEART, mains = the
-                // bass line + drums on BELLY+ROOT, LFE = the sub on FEET (+10 dB,
-                // bass-managed: only what the ButtKicker can move)
-                float centre = split[HEAD] * 0.9f;                       // voice + snare
-                float mains  = split[ROOT] * 0.8f + split[BELLY] * 0.8f; // bass line, low instruments, kick
-                float lfe    = subSig * 3.16f * 3.2f + subh * 0.8f;
-                mix[HEAD] = centre; mix[HEART] = centre;
-                mix[BELLY] = mains; mix[ROOT] = mains;
-                mix[FEET] = lfe;
             }
         }
         // bass-drop detector (all modes track it; BODY fires the effect)

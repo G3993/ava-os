@@ -33,15 +33,16 @@ struct Params {
     // 2 = MONO: the song itself, felt. The music's low end (18-160 Hz) to
     //     every zone, bass (18-80) exaggerated x2, plus an octave-down copy
     //     of the 80-160 Hz bass the rings cannot move. No synthesis, no LFOs.
-    // 3 = STEREO: MONO split left / right. Each ring's L send gets the left
-    //     low end, its R send the right (low-end width x2 so pans are felt);
-    //     the feet stay mono. Needs L/R amp channels per ring (send 1 = L,
-    //     send 2 = R).
-    // 4 = BODY: a 3-channel system, like L/C/R + LFE: HEAD+HEART = the
-    //     voice ("centre"), BELLY+ROOT = bass line + drums (the "mains"),
-    //     FEET = LFE (sub, +10 dB, bass-managed). On a clear bass drop a
-    //     head-to-toe roll fires — the only effect, only then.
+    // 3 = STEREO: MONO split left / right across the bed. The rings alternate
+    //     sides top to bottom (HEAD L, HEART R, BELLY L, ROOT R) with the
+    //     low-end width x2 so pans are felt; the centre pad takes one side
+    //     (stereoCenter). One send per ring.
+    // 4 = SPATIAL: the mix placed on the body. The stereo low end lands by
+    //     side like STEREO, the voice sits up top (HEAD+HEART), bass line +
+    //     drums low (BELLY+ROOT), the sub in the FEET (+10 dB, bass-managed).
+    //     On a clear bass drop a head-to-toe roll fires — the only effect.
     std::atomic<int>   engineMode{2};
+    std::atomic<int>   stereoCenter{0};      // STEREO: the centre pad follows 0 = left, 1 = right
     // SYNC look-ahead. The analysis hears the music the moment it arrives;
     // the vibration synth — and the speakers — hear it this much later. Every
     // detector has some latency (a thump ~8 ms, an FFT onset ~25 ms, a new
