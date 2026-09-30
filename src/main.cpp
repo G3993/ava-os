@@ -2183,63 +2183,87 @@ static void drawWaveBody(float w) {
             static int vn = 0;
             static float vpk = 0.05f;
             if (gVecMode == 5) {
-                // one figure, always becoming another: the beam morphs between
-                // the silhouettes (same start point, same point count, so the
-                // head stays the head), growing and shrinking as it goes.
-                // Mostly it picks a new shape; sometimes it stays and breathes.
-                static int figA = 0, figB = 1;
-                static float scA = 0.8f, scB = 0.84f, phase = 0.0f, dur = 2.5f, hold = 0.0f;
+                // one figure, always becoming another: the outline is a living
+                // shape that is forever easing toward a target silhouette
+                // (same start point, same point count, so the head stays the
+                // head). It never stops between shapes — the next target is
+                // picked while it's still arriving, so shapes blend into each
+                // other. The music's momentum sets how fast; hits glitch it:
+                // bands of the outline tear sideways and jump ahead to the
+                // shape it's becoming, then heal.
+                static float cur[kFigLen][2];
+                static int fig = -1, prev = 0;
+                static float sc = 0.8f, scT = 0.84f, retarget = 0.0f;
                 static double last = 0;
                 static unsigned rng = 0x9E3779B9u;
                 auto rnd = [&]() { rng ^= rng << 13; rng ^= rng >> 17; rng ^= rng << 5; return (rng & 0xFFFFFF) / 16777216.0f; };
-                float dt = last > 0 ? (float)std::min(0.1, now - last) : 0.0f;
-                last = now;
                 float lvl = gEngine.audioLevel.load(), bass = gEngine.audioBass.load();
                 float onset = gEngine.analyzer.out.onsetFlash.load();
-                // momentum: the music's intensity, quick to rise and slow to
-                // fall, drives how fast the figure changes and grows — a loud
-                // passage warps at up to ~3.5x, a quiet one drifts
+                float dt = last > 0 ? (float)std::min(0.1, now - last) : 0.0f;
+                last = now;
+                if (fig < 0) {
+                    fig = 0;
+                    for (int i = 0; i < kFigLen; i++) { cur[i][0] = kFigXY[0][i * 2] / 32767.0f; cur[i][1] = kFigXY[0][i * 2 + 1] / 32767.0f; }
+                }
+                // momentum: quick to rise, slow to fall
                 static float mom = 0.0f;
                 float momT = std::min(1.0f, lvl * 1.4f + bass * 0.6f + onset * 0.8f);
                 mom += (momT - mom) * (momT > mom ? 0.20f : 0.015f);
-                float speed = 0.55f + 3.0f * mom;
-                if (hold > 0.0f) hold -= dt * speed;
-                else {
-                    phase += dt / dur * speed;
-                    if (phase >= 1.0f) {
-                        phase = 0.0f;
-                        figA = figB; scA = scB;
-                        float r = rnd();
-                        if (r < 0.22f) figB = figA;                                   // sometimes it repeats
-                        else { figB = (int)(rnd() * kFigCount) % kFigCount; if (figB == figA) figB = (figB + 1) % kFigCount; }
-                        // size: mostly a step small -> big or back, sometimes a jump
-                        float r2 = rnd();
-                        // barely: it lives between 0.72 and 0.88 of the screen
-                        scB = r2 < 0.5f ? std::min(0.88f, scA + 0.03f + 0.05f * rnd())
-                            : r2 < 0.8f ? std::max(0.72f, scA - 0.03f - 0.05f * rnd())
-                                        : 0.72f + 0.16f * rnd();
-                        dur = 1.2f + 2.8f * rnd();
-                        hold = rnd() < 0.35f ? 0.4f + 1.6f * rnd() : 0.0f;
-                    }
+                // a new target every 1.5-4 s when quiet, 0.4-1.2 s when loud;
+                // sometimes the same one again (it lingers and breathes)
+                retarget -= dt;
+                if (retarget <= 0.0f) {
+                    prev = fig;
+                    if (rnd() < 0.20f) { /* stay */ }
+                    else { fig = (int)(rnd() * kFigCount) % kFigCount; if (fig == prev) fig = (fig + 1) % kFigCount; }
+                    float base = 1.5f + 2.5f * rnd();
+                    retarget = base / (0.6f + 2.6f * mom);
+                    float r2 = rnd();
+                    scT = r2 < 0.5f ? std::min(0.88f, sc + 0.03f + 0.05f * rnd())
+                        : r2 < 0.8f ? std::max(0.72f, sc - 0.03f - 0.05f * rnd())
+                                    : 0.72f + 0.16f * rnd();
                 }
-                float e = phase * phase * (3.0f - 2.0f * phase);                       // ease in-out
-                if (figB == figA) e = 0.0f;
-                float sc = (scA + (scB - scA) * e) * (1.0f + 0.02f * lvl + 0.02f * onset);
+                // the ease: a fraction of the remaining distance per second,
+                // faster with momentum — an exponential glide, so arrivals
+                // are soft and the next departure is already under way
+                float k = 1.0f - std::exp(-dt * (1.6f + 5.0f * mom));
+                sc += (scT - sc) * k * 0.7f;
+                // glitch bands from the sound: on a hit, 1-3 horizontal bands
+                // tear sideways and snap toward the target, healing over ~150 ms
+                static float gT = 0.0f, gY0[3], gY1[3], gDx[3];
+                static int gN = 0;
+                if (onset > 0.35f && gT <= 0.0f && rnd() < 0.7f) {
+                    gT = 0.10f + 0.12f * onset;
+                    gN = 1 + (int)(rnd() * 3);
+                    for (int g = 0; g < gN; g++) { gY0[g] = -0.9f + 1.6f * rnd(); gY1[g] = gY0[g] + 0.06f + 0.25f * rnd(); gDx[g] = (rnd() < 0.5f ? -1.0f : 1.0f) * (0.03f + 0.10f * onset); }
+                }
+                float gA = gT > 0.0f ? std::min(1.0f, gT / 0.12f) : 0.0f;
+                if (gT > 0.0f) gT -= dt;
                 float breathe = 1.0f + 0.012f * std::sin((float)now * 1.4f);
+                float swell = sc * breathe * (1.0f + 0.02f * lvl);
                 vn = kFigLen;
                 for (int i = 0; i < kFigLen; i++) {
-                    float ax = kFigXY[figA][i * 2] / 32767.0f, ay = kFigXY[figA][i * 2 + 1] / 32767.0f;
-                    float bx = kFigXY[figB][i * 2] / 32767.0f, by = kFigXY[figB][i * 2 + 1] / 32767.0f;
-                    float x = ax + (bx - ax) * e, y = ay + (by - ay) * e;
-                    // a little of the music runs along the outline
+                    float tx = kFigXY[fig][i * 2] / 32767.0f, ty = kFigXY[fig][i * 2 + 1] / 32767.0f;
+                    cur[i][0] += (tx - cur[i][0]) * k;
+                    cur[i][1] += (ty - cur[i][1]) * k;
+                    float x = cur[i][0], y = cur[i][1];
+                    if (gA > 0.0f) {
+                        for (int g = 0; g < gN; g++) {
+                            if (y >= gY0[g] && y <= gY1[g]) {
+                                x += gDx[g] * gA;                          // the tear
+                                x += (tx - x) * 0.6f * gA;                 // and the jump ahead
+                                y += (ty - y) * 0.6f * gA;
+                            }
+                        }
+                    }
+                    // a little of the bass runs along the outline
                     int ip = (i - 1 + kFigLen) % kFigLen, in_ = (i + 1) % kFigLen;
-                    float tx = (kFigXY[figA][in_ * 2] - kFigXY[figA][ip * 2]) / 32767.0f;
-                    float ty = (kFigXY[figA][in_ * 2 + 1] - kFigXY[figA][ip * 2 + 1]) / 32767.0f;
-                    float tl = std::sqrt(tx * tx + ty * ty) + 1e-6f;
+                    float ex = cur[in_][0] - cur[ip][0], ey = cur[in_][1] - cur[ip][1];
+                    float el = std::sqrt(ex * ex + ey * ey) + 1e-6f;
                     float u = i * dsp::kTwoPi / kFigLen;
-                    float wav = (0.003f + 0.030f * bass) * std::sin(u * 6.0f - (float)now * 2.5f);
-                    x += -ty / tl * wav; y += tx / tl * wav;
-                    vx[i] = x * sc * breathe; vy[i] = y * sc * breathe;
+                    float wav = (0.003f + 0.025f * bass) * std::sin(u * 6.0f - (float)now * 2.5f);
+                    x += -ey / el * wav; y += ex / el * wav;
+                    vx[i] = x * swell; vy[i] = y * swell;
                 }
                 gAnimLoops = 1; gAnimLoopLen[0] = kFigLen;
             } else if (gVecMode == 4) {
