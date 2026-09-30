@@ -663,33 +663,46 @@ static void shadedDisc(ImDrawList* dl, ImVec2 c, float r, ImVec2 cc, ImU32 colCe
     }
 }
 
-// a small glass bead lit from the upper left; while its zone is on it glows
-// like a lamp and rings swell out of it and fade — a drop on water, pulsing
-// at the zone's level
-static void rippleDot(ImDrawList* dl, ImVec2 c, float r, float lvl, float seed) {
+// light blue: the colour of the signal light in the beads
+static inline ImU32 LB(float a) { return IM_COL32(150, 205, 255, (int)(255 * std::min(1.0f, std::max(0.0f, a)))); }
+
+// a small glass bead lit from the upper left. `sig` is the signal passing
+// through its slice right now (-1..1): the bead swells with it and lights up
+// light blue like a lamp, so the wave is seen travelling around the ring.
+// `lvl` is the zone's level (0..1) for the slow ripple rings.
+static void rippleDot(ImDrawList* dl, ImVec2 c, float r0, float sig, float lvl, float seed) {
     float t = (float)ImGui::GetTime();
     const int segs = 64;
-    float on = std::min(1.0f, lvl * 1.5f);
+    float on = std::min(1.0f, std::fabs(sig) * 1.3f);       // how lit the lamp is
+    float r = r0 * (1.0f + 0.55f * on);                      // the bead swells with the signal
+    if (on > 0.03f) {
+        // lamp glow: a soft light-blue halo falling off to nothing
+        shadedDisc(dl, c, r * (2.6f + 3.0f * on), c, LB(0.45f * on), LB(0.0f), segs);
+    }
     if (lvl > 0.04f) {
-        // lamp glow: a soft halo falling off to nothing
-        shadedDisc(dl, c, r * (3.0f + 3.0f * lvl), c, W(0.30f * on), W(0.0f), segs);
         const int rings = 3;
+        float ol = std::min(1.0f, lvl * 1.5f);
         for (int j = 0; j < rings; j++) {
             float ph = std::fmod(t * (0.9f + 0.6f * lvl) + seed + j / (float)rings, 1.0f);
-            float rr = r + ph * (r * 2.2f + r * 3.5f * lvl);
-            float a = (1.0f - ph) * (1.0f - ph) * 0.45f * on;
-            dl->AddCircle(c, rr, W(a), segs, std::max(0.8f, 1.6f * (1.0f - ph)));
+            float rr = r0 + ph * (r0 * 2.2f + r0 * 3.5f * lvl);
+            float a = (1.0f - ph) * (1.0f - ph) * 0.35f * ol;
+            dl->AddCircle(c, rr, LB(a), segs, std::max(0.8f, 1.6f * (1.0f - ph)));
         }
     }
     // contact shadow under the bead
     shadedDisc(dl, ImVec2(c.x + r * 0.15f, c.y + r * 0.45f), r * 1.25f, ImVec2(c.x + r * 0.15f, c.y + r * 0.45f),
                IM_COL32(0, 0, 0, 90), IM_COL32(0, 0, 0, 0), segs);
-    // the sphere: lit from the upper left, dark at the rim
+    // the sphere: grey glass when dark, light blue from within when lit
     ImVec2 light(c.x - r * 0.35f, c.y - r * 0.38f);
-    float hi = 0.55f + 0.45f * on, lo = 0.10f + 0.12f * on;
-    shadedDisc(dl, c, r, light, W(hi), W(lo), segs);
-    // rim light from below right (glass), and a tight specular
-    dl->AddCircle(c, r - 0.5f, W(0.10f + 0.25f * on), segs, 1.0f);
+    auto mixc = [&](float g, float bl) {                     // grey g (0..1) blended toward light blue by bl
+        int R_ = (int)(255 * (g * (1 - bl) + 150 / 255.0f * bl));
+        int G_ = (int)(255 * (g * (1 - bl) + 205 / 255.0f * bl));
+        int B_ = (int)(255 * (g * (1 - bl) + 255 / 255.0f * bl));
+        return IM_COL32(R_, G_, B_, 255);
+    };
+    shadedDisc(dl, c, r, light, mixc(0.55f + 0.45f * on, 0.85f * on), mixc(0.10f + 0.20f * on, 0.9f * on), segs);
+    // rim light (glass), and a tight specular
+    dl->AddCircle(c, r - 0.5f, on > 0.1f ? LB(0.25f + 0.45f * on) : W(0.10f), segs, 1.0f);
     shadedDisc(dl, light, r * 0.34f, light, IM_COL32(255, 255, 255, (int)(255 * (0.75f + 0.25f * on))), IM_COL32(255, 255, 255, 0), 32);
 }
 
@@ -792,6 +805,20 @@ static void drawOctagon(ImDrawList* dl, ImVec2 c, float R) {
     };
 
     // rings, outer first so inner edges overlay cleanly
+    // the beads carry the ring's own output: slice k shows the sample k taps
+    // back in the scope buffer, so the wave is seen going around the ring
+    const int sN = Engine::kScopeLen, sW = gEngine.scopeW.load(std::memory_order_relaxed);
+    const int tapStep = 3;                                   // 3 × 0.67 ms per slice ≈ one 60 Hz cycle around
+    float sigPk[NZONES];
+    for (int z = 0; z < NZONES; z++) {
+        float pk = 1e-3f;
+        for (int i = 1; i <= 96; i++) pk = std::max(pk, std::fabs(gEngine.vibScope[z][(sW - i + sN) % sN]));
+        sigPk[z] = std::max(pk, 0.02f);
+    }
+    auto sigAt = [&](int z, int k) {
+        return gEngine.vibScope[z][(sW - 1 - k * tapStep + sN) % sN] / sigPk[z]
+             * std::min(1.0f, gEngine.meter[2 + z].load() * 4.0f);   // silent zone = dark, whatever the buffer holds
+    };
     for (int ring = 3; ring >= 0; ring--) {
         float lvl = gEngine.meter[2 + ringZone[ring]].load();
         for (int k = 0; k < 8; k++) {
@@ -821,7 +848,7 @@ static void drawOctagon(ImDrawList* dl, ImVec2 c, float R) {
                             held ? 2.5f : 1.0f);
 
             // bead embedded in the slice: dark when idle, lit + rippling when the zone fires
-            rippleDot(dl, ctr, 3.6f, lvl, k * 0.37f + ring * 0.9f);
+            rippleDot(dl, ctr, 3.6f, sigAt(ringZone[ring], k), lvl, k * 0.37f + ring * 0.9f);
         }
     }
 
@@ -842,7 +869,7 @@ static void drawOctagon(ImDrawList* dl, ImVec2 c, float R) {
                         IM_COL32(255, 255, 255, std::min(a, 252)),
                         held ? IM_COL32(255, 255, 255, 230) : IM_COL32(0, 0, 0, 26),
                         held ? 2.5f : 1.0f);
-        rippleDot(dl, c, 8.0f, lvl, 0.0f);
+        rippleDot(dl, c, 8.0f, sigAt(FEET, 0), lvl, 0.0f);
     }
 }
 
@@ -2140,9 +2167,11 @@ static void drawWaveBody(float w) {
             // its own row under the label so nothing gets clipped
             const float sw = std::max(70.0f, std::min(110.0f, (w - 150) / 4 - 8));
             ImGui::SetCursorScreenPos(ImVec2(o.x, y + 18));
-            if (gScopeTrig) ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(1, 1, 1, 0.28f));
+            // (push/pop on a copy: the click flips the flag between them)
+            bool litT = gScopeTrig;
+            if (litT) ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(1, 1, 1, 0.28f));
             if (ImGui::SmallButton("TRIG")) gScopeTrig = !gScopeTrig;
-            if (gScopeTrig) ImGui::PopStyleColor();
+            if (litT) ImGui::PopStyleColor();
             if (ImGui::IsItemHovered()) ImGui::SetTooltip("triggered sweep: every refresh starts on a rising zero crossing,\nso a steady tone stands still instead of sliding");
             ImGui::SameLine(0, 6);
             ImGui::SetNextItemWidth(sw);
@@ -2160,9 +2189,10 @@ static void drawWaveBody(float w) {
             ImGui::SetNextItemWidth(sw);
             ImGui::SliderFloat("##gain", &gScopeGain, 0.25f, 4.0f, "gain %.2f");
             ImGui::SameLine(0, 6);
-            if (gScopeFreeze) ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(1, 1, 1, 0.28f));
+            bool litF = gScopeFreeze;
+            if (litF) ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(1, 1, 1, 0.28f));
             if (ImGui::SmallButton(gScopeFreeze ? "RUN" : "FREEZE")) gScopeFreeze = !gScopeFreeze;
-            if (gScopeFreeze) ImGui::PopStyleColor();
+            if (litF) ImGui::PopStyleColor();
         }
         if (gFontSmall) ImGui::PopFont();
         const float laneGap = 8, top = y + 46;
