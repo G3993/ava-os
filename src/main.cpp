@@ -644,6 +644,26 @@ static float velCurve(int v) {
     return 0.30f + 0.70f * std::pow(x, 1.5f);
 }
 
+// a small bead with a lit top edge, and while its zone is on, rings that
+// swell out of it and fade — a drop on water, pulsing at the zone's level
+static void rippleDot(ImDrawList* dl, ImVec2 c, float r, float lvl, float seed) {
+    float t = (float)ImGui::GetTime();
+    if (lvl > 0.04f) {
+        const int rings = 3;
+        for (int j = 0; j < rings; j++) {
+            float ph = std::fmod(t * (0.9f + 0.6f * lvl) + seed + j / (float)rings, 1.0f);
+            float rr = r + ph * (r * 2.2f + r * 3.5f * lvl);
+            float a = (1.0f - ph) * (1.0f - ph) * (0.45f * std::min(1.0f, lvl * 1.5f));
+            dl->AddCircle(c, rr, W(a), 0, std::max(0.8f, 1.6f * (1.0f - ph)));
+        }
+        dl->AddCircleFilled(c, r * 1.8f, W(0.16f * lvl), 0);
+    }
+    float dg = 0.38f + 0.62f * lvl;
+    dl->AddCircleFilled(ImVec2(c.x, c.y + r * 0.25f), r * 1.05f, IM_COL32(0, 0, 0, 55));   // shadow under
+    dl->AddCircleFilled(c, r, IM_COL32((int)(dg * 255), (int)(dg * 255), (int)(dg * 255), 255));
+    dl->AddCircleFilled(ImVec2(c.x - r * 0.28f, c.y - r * 0.32f), r * 0.42f, W(0.35f + 0.45f * lvl)); // lit top edge
+}
+
 static void drawOctagon(ImDrawList* dl, ImVec2 c, float R) {
     // zone per ring: center pad = FEET, then ROOT→HEAD outward (grounded
     // layout — same order as the MIDI zone pads)
@@ -771,13 +791,8 @@ static void drawOctagon(ImDrawList* dl, ImVec2 c, float R) {
                             held ? IM_COL32(255, 255, 255, 230) : IM_COL32(0, 0, 0, 30),
                             held ? 2.5f : 1.0f);
 
-            // dot embedded in the slice: dark when idle, lit when the zone fires
-            float dg = 0.40f + 0.60f * lvl;
-            dl->AddCircleFilled(ImVec2(ctr.x, ctr.y + 1.0f), 6.0f, IM_COL32(0, 0, 0, 35));
-            dl->AddCircleFilled(ctr, 5.5f,
-                IM_COL32((int)(dg * 255), (int)(dg * 255), (int)(dg * 255), 255));
-            if (lvl > 0.05f)
-                dl->AddCircleFilled(ctr, 9.0f + 6.0f * lvl, W(0.18f * lvl));
+            // bead embedded in the slice: dark when idle, lit + rippling when the zone fires
+            rippleDot(dl, ctr, 3.6f, lvl, k * 0.37f + ring * 0.9f);
         }
     }
 
@@ -798,11 +813,7 @@ static void drawOctagon(ImDrawList* dl, ImVec2 c, float R) {
                         IM_COL32(255, 255, 255, std::min(a, 252)),
                         held ? IM_COL32(255, 255, 255, 230) : IM_COL32(0, 0, 0, 26),
                         held ? 2.5f : 1.0f);
-        dl->AddCircleFilled(ImVec2(c.x, c.y + 1.5f), 14.5f, IM_COL32(0, 0, 0, 38));
-        float dg = 0.45f + 0.55f * lvl;
-        dl->AddCircleFilled(c, 13.0f,
-            IM_COL32((int)(dg * 255), (int)(dg * 255), (int)(dg * 255), 255));
-        if (lvl > 0.05f) dl->AddCircleFilled(c, 22.0f + 10.0f * lvl, W(0.20f * lvl));
+        rippleDot(dl, c, 8.0f, lvl, 0.0f);
     }
 }
 
@@ -1898,9 +1909,14 @@ static float drawShaderPreviewCentered(ImDrawList* dl, ImVec2 o, float w, float 
 }
 
 // ── WAVE: MASTER (input) and the five rings (output) as scopes ──
-static float gScopeZoom = 1.5f;   // 1 = the whole 340 ms buffer, 8 = the last ~40 ms
+static float gScopeMs = 120.0f;   // time on screen (the buffer holds ~341 ms)
 static float gScopeGain = 1.0f;
+static bool  gScopeTrig = true;   // triggered sweep: start each trace on a rising zero crossing, so it stands still
+static float gScopeRate = 12.0f;  // refreshes per second; low = calm, 60 = live
+static float gScopeHold = 0.35f;  // frame blending 0..0.95: how much of the last picture stays
+static bool  gScopeFreeze = false;
 static bool gVecBig = false;      // vectorscope: small beside the wave, or large
+static int  gVecMode = 0;         // 0 = input L/R · 1 = HEAD×FEET · 2 = HEART×BELLY · 3 = ROOT×FEET (ring Lissajous)
 // phosphor: the scope traces glow green on a graticule, like the instrument
 static inline ImU32 PH(float a) { return IM_COL32(120, 255, 170, (int)(255 * std::min(1.0f, std::max(0.0f, a)))); }
 static void drawWaveBody(float w) {
@@ -1914,25 +1930,59 @@ static void drawWaveBody(float w) {
     };
     int wi = gEngine.scopeW.load(std::memory_order_relaxed);
     const int N = Engine::kScopeLen;
+    const float bufMs = N * 32.0f / 48000.0f * 1000.0f;   // scope decimation 32 at 48 k
     // how much of the buffer is on screen: the newest `span` samples
-    int span = std::max(64, (int)(N / gScopeZoom));
-    int first = (wi - span + N) % N;
+    int span = std::max(64, std::min(N - 8, (int)(N * gScopeMs / bufMs)));
+    int newest = (wi - span + N) % N;
+    // the scope refreshes at its own rate, not every frame: between refreshes
+    // the picture holds, which is what makes a scope readable
+    static double lastRefresh = 0;
+    double now = glfwGetTime();
+    bool refresh = !gScopeFreeze && now - lastRefresh >= 1.0 / std::max(1.0f, gScopeRate);
+    if (refresh) lastRefresh = now;
+    // triggered sweep: walk back from the newest window to the last rising
+    // zero crossing so every refresh starts at the same phase
+    auto trigStart = [&](const float* buf) {
+        if (!gScopeTrig) return newest;
+        int search = std::min(N - span - 2, N / 2);
+        for (int back = 0; back < search; back++) {
+            int i = (newest - back + N) % N, ip = (i - 1 + N) % N;
+            if (buf[ip] < 0.0f && buf[i] >= 0.0f) return i;
+        }
+        return newest;
+    };
     // a 3-tap smooth so the traces read as waves, not needles
-    auto sampleAt = [&](const float* buf, int i) {
+    auto sampleAt = [&](const float* buf, int first, int i) {
         int a = (first + i - 1 + N) % N, b = (first + i) % N, c = (first + i + 1) % N;
         return 0.25f * buf[a] + 0.5f * buf[b] + 0.25f * buf[c];
     };
+    // one picture per trace (0 = master, 1.. = rings), kept between refreshes
+    // and blended with the last one by HOLD
+    static float shape[NZONES + 1][Engine::kScopeLen];
+    static int shapeN[NZONES + 1] = {0};
     static ImVec2 pts[Engine::kScopeLen];
-    auto trace = [&](const float* buf, float x0, float x1, float mid, float amp, float gain, ImU32 glow, ImU32 line) {
+    auto trace = [&](int id, const float* buf, float x0, float x1, float mid, float amp, float gain) {
         int P = std::min(span, N);
-        for (int i = 0; i < P; i++) {
-            float v = sampleAt(buf, i) * gain;
-            pts[i] = ImVec2(x0 + (x1 - x0) * i / (float)(P - 1), mid - amp * std::max(-1.0f, std::min(1.0f, v)));
+        if (refresh || shapeN[id] != P) {
+            int first = trigStart(buf);
+            bool blend = shapeN[id] == P && gScopeHold > 0.0f;
+            for (int i = 0; i < P; i++) {
+                float v = std::max(-1.0f, std::min(1.0f, sampleAt(buf, first, i) * gain));
+                shape[id][i] = blend ? shape[id][i] * gScopeHold + v * (1.0f - gScopeHold) : v;
+            }
+            shapeN[id] = P;
         }
-        (void)glow; (void)line;
+        for (int i = 0; i < P; i++)
+            pts[i] = ImVec2(x0 + (x1 - x0) * i / (float)(P - 1), mid - amp * shape[id][i]);
         dl->AddPolyline(pts, P, PH(0.10f), 0, 7.0f);
         dl->AddPolyline(pts, P, PH(0.28f), 0, 3.0f);
         dl->AddPolyline(pts, P, PH(0.95f), 0, 1.2f);
+    };
+    // the peak of the newest window, for auto-scale
+    auto peakOf = [&](const float* buf) {
+        float pk = 1e-3f;
+        for (int i = 0; i < span; i++) pk = std::max(pk, std::fabs(buf[(newest + i) % N]));
+        return pk;
     };
     // graticule: a dotted grid, 8 divisions across and 4 tall, like a scope screen
     auto graticule = [&](float gx0, float gy0, float gx1, float gy1) {
@@ -1963,10 +2013,8 @@ static void drawWaveBody(float w) {
         graticule(wx0 + 4, top + 6, o.x + w - 8, top + hh - 6);
         {
             // auto-scale the input like the rings, so a quiet song still draws a wave
-            float pk = 1e-3f;
-            for (int i = 0; i < span; i++) pk = std::max(pk, std::fabs(gEngine.scope[(first + i) % N]));
-            float g = gScopeGain * 0.9f / std::max(pk, 0.02f);
-            trace(gEngine.scope, wx0 + 8, o.x + w - 12, top + hh / 2, hh * 0.42f, g, W(0.25f), W(0.95f));
+            float g = gScopeGain * 0.9f / std::max(peakOf(gEngine.scope), 0.02f);
+            trace(0, gEngine.scope, wx0 + 8, o.x + w - 12, top + hh / 2, hh * 0.42f, g);
         }
         // ── vectorscope: L against R, turned 45° so mono is a vertical line,
         //    width opens it into a cloud; the last ~21 ms of samples ──
@@ -1977,7 +2025,9 @@ static void drawWaveBody(float w) {
             ImGui::SetCursorScreenPos(ImVec2(c.x - r, c.y - r));
             if (ImGui::InvisibleButton("##vecsize", ImVec2(2 * r, 2 * r))) gVecBig = !gVecBig;
             bool vh = ImGui::IsItemHovered();
-            if (vh) { ImGui::SetTooltip(gVecBig ? "click: smaller" : "click: bigger"); ImGui::SetMouseCursor(ImGuiMouseCursor_Hand); }
+            if (vh && ImGui::IsMouseClicked(1)) gVecMode = (gVecMode + 1) % 4;
+            static const char* vecNames[4] = {"L / R", "HEAD x FEET", "HEART x BELLY", "ROOT x FEET"};
+            if (vh) { ImGui::SetTooltip("%s\nclick: %s  ·  right-click: next pair", vecNames[gVecMode], gVecBig ? "smaller" : "bigger"); ImGui::SetMouseCursor(ImGuiMouseCursor_Hand); }
             // the screen: a round scope face with graticule rings and axes
             dl->AddCircleFilled(c, r + 4, IM_COL32(6, 10, 8, 255), 64);
             if (vh) dl->AddCircleFilled(c, r, PH(0.03f), 64);
@@ -1991,66 +2041,112 @@ static void drawWaveBody(float w) {
                 dl->AddLine(ImVec2(c.x + r * l0 * std::cos(a), c.y + r * l0 * std::sin(a)),
                             ImVec2(c.x + r * std::cos(a), c.y + r * std::sin(a)), PH(0.16f), 1.0f);
             }
-            int vw = gEngine.vecW.load(std::memory_order_relaxed);
-            const int VN = Engine::kVecLen;
-            static ImVec2 vp[Engine::kVecLen];
-            // auto-gain like the waves: the cloud fills the screen at any level
+            // the picture: unit-square XY points, refreshed at the scope rate
+            static float vx[Engine::kVecLen], vy[Engine::kVecLen];
+            static int vn = 0;
             static float vpk = 0.05f;
-            float pk = 1e-3f;
-            for (int i = 0; i < VN; i++) pk = std::max(pk, std::max(std::fabs(gEngine.vecL[i]), std::fabs(gEngine.vecR[i])));
-            vpk += (pk - vpk) * (pk > vpk ? 0.5f : 0.03f);
-            float g = gScopeGain * 0.85f / std::max(vpk, 0.02f);
-            for (int i = 0; i < VN; i++) {
-                int k = (vw + i) % VN;
-                float l = gEngine.vecL[k] * g, rr = gEngine.vecR[k] * g;
-                float x = (l - rr) * 0.707f, yv = (l + rr) * 0.707f;
+            if (refresh || vn == 0) {
+                if (gVecMode == 0) {
+                    // input L against R, turned 45° so mono is a vertical line
+                    int vw = gEngine.vecW.load(std::memory_order_relaxed);
+                    const int VN = Engine::kVecLen;
+                    float pk = 1e-3f;
+                    for (int i = 0; i < VN; i++) pk = std::max(pk, std::max(std::fabs(gEngine.vecL[i]), std::fabs(gEngine.vecR[i])));
+                    vpk += (pk - vpk) * (pk > vpk ? 0.5f : 0.03f);
+                    float g = gScopeGain * 0.85f / std::max(vpk, 0.02f);
+                    for (int i = 0; i < VN; i++) {
+                        int k = (vw + i) % VN;
+                        float l = gEngine.vecL[k] * g, rr = gEngine.vecR[k] * g;
+                        vx[i] = (l - rr) * 0.707f; vy[i] = (l + rr) * 0.707f;
+                    }
+                    vn = VN;
+                } else {
+                    // two rings against each other: the tuning drawn as a
+                    // Lissajous figure (a 3:2 chord is a clean knot, a beat
+                    // tuning slowly turns)
+                    static const int pairs[4][2] = {{0, 0}, {HEAD, FEET}, {HEART, BELLY}, {ROOT, FEET}};
+                    const float* bx = gEngine.vibScope[pairs[gVecMode][0]];
+                    const float* by = gEngine.vibScope[pairs[gVecMode][1]];
+                    float gx = 0.85f / std::max(peakOf(bx), 0.02f), gy = 0.85f / std::max(peakOf(by), 0.02f);
+                    int first = trigStart(bx);
+                    vn = std::min(span, N);
+                    for (int i = 0; i < vn; i++) { vx[i] = sampleAt(bx, first, i) * gx; vy[i] = sampleAt(by, first, i) * gy; }
+                }
+            }
+            static ImVec2 vp[Engine::kVecLen];
+            for (int i = 0; i < vn; i++) {
+                float x = vx[i], yv = vy[i];
                 float m = std::sqrt(x * x + yv * yv);
                 if (m > 1.0f) { x /= m; yv /= m; }
                 vp[i] = ImVec2(c.x + x * r, c.y - yv * r);
             }
-            // persistence: the trace is drawn in 4 age bands, the oldest faintest,
-            // each with a soft glow under a thin bright beam
-            const int bands = 4, per = VN / bands;
-            for (int b = 0; b < bands; b++) {
-                float age = (b + 1) / (float)bands;           // 1 = newest
-                int i0 = b * per, cnt = (b == bands - 1 ? VN - i0 : per + 1);
-                cnt = std::min(cnt, VN - i0);
-                dl->AddPolyline(vp + i0, cnt, PH(0.06f * age), 0, 6.0f);
-                dl->AddPolyline(vp + i0, cnt, PH(0.22f * age), 0, 2.5f);
-                dl->AddPolyline(vp + i0, cnt, PH(0.30f + 0.65f * age), 0, 1.0f);
+            // beam: a real CRT spot is brighter where it moves slowly and
+            // fades where it whips across, and the oldest samples fade too
+            dl->AddPolyline(vp, vn, PH(0.05f), 0, 6.0f);
+            for (int i = 1; i < vn; i++) {
+                float dx = vp[i].x - vp[i - 1].x, dy = vp[i].y - vp[i - 1].y;
+                float sp = std::sqrt(dx * dx + dy * dy) / r;          // fraction of the radius per sample
+                float bright = 1.0f / (1.0f + sp * 14.0f);
+                float age = 0.35f + 0.65f * i / (float)vn;             // 1 = newest
+                dl->AddLine(vp[i - 1], vp[i], PH((0.25f + 0.75f * bright) * age), 1.3f);
             }
             if (gFontSmall) ImGui::PushFont(gFontSmall);
-            dl->AddText(ImVec2(c.x - r - 2, c.y + r - 4), PH(0.45f), "L");
-            dl->AddText(ImVec2(c.x + r - 6, c.y + r - 4), PH(0.45f), "R");
+            if (gVecMode > 0) { ImVec2 ns = ImGui::CalcTextSize(vecNames[gVecMode]); dl->AddText(ImVec2(c.x - ns.x / 2, c.y + r - 4), PH(0.5f), vecNames[gVecMode]); }
             if (gFontSmall) ImGui::PopFont();
+            if (gVecMode == 0) {
+                if (gFontSmall) ImGui::PushFont(gFontSmall);
+                dl->AddText(ImVec2(c.x - r - 2, c.y + r - 4), PH(0.45f), "L");
+                dl->AddText(ImVec2(c.x + r - 6, c.y + r - 4), PH(0.45f), "R");
+                if (gFontSmall) ImGui::PopFont();
+            }
         }
         y = top + hh + 18;
     }
     // ── RINGS · Output, with zoom and gain on the right of the header ──
     {
         label("RINGS   ·   Output", y);
+        // scope controls, right of the header: TRIG · time · rate · hold · gain · FREEZE
         if (gFontSmall) ImGui::PushFont(gFontSmall);
-        ImGui::SetCursorScreenPos(ImVec2(o.x + w - 250, y - 4));
-        ImGui::SetNextItemWidth(118);
-        ImGui::SliderFloat("##zoom", &gScopeZoom, 1.0f, 8.0f, "zoom %.1fx");
-        ImGui::SameLine(0, 8);
-        ImGui::SetNextItemWidth(118);
-        ImGui::SliderFloat("##gain", &gScopeGain, 0.25f, 4.0f, "gain %.2fx");
+        {
+            // its own row under the label so nothing gets clipped
+            const float sw = std::max(70.0f, std::min(110.0f, (w - 150) / 4 - 8));
+            ImGui::SetCursorScreenPos(ImVec2(o.x, y + 18));
+            if (gScopeTrig) ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.47f, 1.0f, 0.67f, 0.25f));
+            if (ImGui::SmallButton("TRIG")) gScopeTrig = !gScopeTrig;
+            if (gScopeTrig) ImGui::PopStyleColor();
+            if (ImGui::IsItemHovered()) ImGui::SetTooltip("triggered sweep: every refresh starts on a rising zero crossing,\nso a steady tone stands still instead of sliding");
+            ImGui::SameLine(0, 6);
+            ImGui::SetNextItemWidth(sw);
+            ImGui::SliderFloat("##time", &gScopeMs, 20.0f, bufMs, "%.0f ms", ImGuiSliderFlags_Logarithmic);
+            if (ImGui::IsItemHovered()) ImGui::SetTooltip("time across the screen");
+            ImGui::SameLine(0, 6);
+            ImGui::SetNextItemWidth(sw);
+            ImGui::SliderFloat("##rate", &gScopeRate, 1.0f, 60.0f, "%.0f /s", ImGuiSliderFlags_Logarithmic);
+            if (ImGui::IsItemHovered()) ImGui::SetTooltip("refreshes per second: low = calm, 60 = live");
+            ImGui::SameLine(0, 6);
+            ImGui::SetNextItemWidth(sw);
+            ImGui::SliderFloat("##hold", &gScopeHold, 0.0f, 0.95f, "hold %.2f");
+            if (ImGui::IsItemHovered()) ImGui::SetTooltip("how much of the last picture stays on each refresh");
+            ImGui::SameLine(0, 6);
+            ImGui::SetNextItemWidth(sw);
+            ImGui::SliderFloat("##gain", &gScopeGain, 0.25f, 4.0f, "gain %.2f");
+            ImGui::SameLine(0, 6);
+            if (gScopeFreeze) ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.47f, 1.0f, 0.67f, 0.25f));
+            if (ImGui::SmallButton(gScopeFreeze ? "RUN" : "FREEZE")) gScopeFreeze = !gScopeFreeze;
+            if (gScopeFreeze) ImGui::PopStyleColor();
+        }
         if (gFontSmall) ImGui::PopFont();
-        const float laneGap = 8, top = y + 22;
+        const float laneGap = 8, top = y + 46;
         // the lanes take whatever height the card has left
         float roomH = ImGui::GetWindowPos().y + ImGui::GetWindowSize().y - top - 16;
         const float lane = std::max(44.0f, std::min(110.0f, (roomH - 4 * laneGap) / NZONES));
         for (int z = 0; z < NZONES; z++) {
             float ly = top + z * (lane + laneGap), mid = ly + lane / 2, amp = lane * 0.42f;
-            float lvl = gEngine.meter[2 + z].load();
             dl->AddRectFilled(ImVec2(o.x, ly), ImVec2(o.x + w, ly + lane), IM_COL32(8, 8, 9, 255), 10);
             graticule(o.x + 68, ly + 4, o.x + w - 8, ly + lane - 4);
             // auto-scale each ring to its own recent peak so every lane draws a full wave
-            float pk = 1e-3f;
-            for (int i = 0; i < span; i++) pk = std::max(pk, std::fabs(gEngine.vibScope[z][(first + i) % N]));
-            float gain = gScopeGain * 0.9f / std::max(pk, 0.02f);
-            trace(gEngine.vibScope[z], o.x + 72, o.x + w - 12, mid, amp, gain, W(0.10f + 0.2f * lvl), W(0.55f + 0.4f * lvl));
+            float gain = gScopeGain * 0.9f / std::max(peakOf(gEngine.vibScope[z]), 0.02f);
+            trace(1 + z, gEngine.vibScope[z], o.x + 72, o.x + w - 12, mid, amp, gain);
             if (gFontSmall) ImGui::PushFont(gFontSmall);
             dl->AddText(ImVec2(o.x + 12, mid - 13), W(0.75f), kZoneNames[z]);
             char hz[16]; snprintf(hz, sizeof hz, "%.0f Hz", gEngine.zoneHz[z].load());
