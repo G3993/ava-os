@@ -45,7 +45,7 @@ static int runSelfTest();
 #ifndef TEMPLE_SELFTEST_ONLY
 #include "imgui.h"
 #include "imgui_internal.h"
-#include "floaters_path.h"
+#include "floaters_anim.h"
 #include "imgui_impl_glfw.h"
 #include "imgui_impl_opengl3.h"
 #include <GLFW/glfw3.h>
@@ -2014,7 +2014,8 @@ static float gScopeHold = 0.35f;  // frame blending 0..0.95: how much of the las
 static bool  gScopeFreeze = false;
 static bool gVecBig = false;      // vectorscope: small beside the wave, or large
 static int  gVecMode = 4;         // 0 = input L/R · 1 = HEAD×FEET · 2 = HEART×BELLY · 3 = ROOT×FEET (ring Lissajous) · 4 = FLOATERS (the mark, drawn by the beam)
-static bool gShowSpectrum = true; // MASTER right side: spectrum (true) or the input wave
+static bool gShowSpectrum = false; // MASTER right side: the input wave (default) or the spectrum; click the label
+static int  gAnimLoops = 0, gAnimLoopLen[8];   // the floaters frame on screen: its closed loops
 // phosphor: the scope traces glow green on a graticule, like the instrument
 static inline ImU32 PH(float a) { return IM_COL32(255, 255, 255, (int)(255 * std::min(1.0f, std::max(0.0f, a)))); }
 static void drawWaveBody(float w) {
@@ -2181,48 +2182,43 @@ static void drawWaveBody(float w) {
             static int vn = 0;
             static float vpk = 0.05f;
             if (gVecMode == 4) {
-                // the floaters: each figure's outline is a beam path. The
-                // music makes them wavy — a ripple travels along every
-                // outline, deeper with the bass, and each figure drifts and
-                // breathes on its own, like they're floating in it.
+                // the floaters: the mark's own animation (12 s loop, 30 fps),
+                // each frame's outlines traced as beam paths. The whole mark
+                // turns very slowly, the music adds a ripple along every
+                // outline (deeper with the bass) and a breath on the level.
                 float tf = (float)now;
                 float lvl = gEngine.audioLevel.load(), bass = gEngine.audioBass.load();
                 float onset = gEngine.analyzer.out.onsetFlash.load();
-                int o = 0;
+                int frame = (int)std::fmod(tf * kAnimFps, (float)kAnimFrames);
+                float spin = tf * (dsp::kTwoPi / 90.0f);             // one turn every 90 s
+                float cs = std::cos(spin), sn = std::sin(spin);
+                float scale = 0.94f + 0.06f * lvl + 0.04f * onset;
+                static int frameLoops = 0;
+                static int loopLens[8];
+                frameLoops = 0;
                 vn = 0;
-                for (int f = 0; f < kFloaterPaths && vn + kFloaterLen[f] <= Engine::kVecLen; f++) {
-                    int n = kFloaterLen[f];
-                    // centroid, so each figure can breathe and turn about itself
-                    float mx = 0, my = 0;
-                    for (int i = 0; i < n; i++) { mx += kFloaterXY[(o + i) * 2]; my += kFloaterXY[(o + i) * 2 + 1]; }
-                    mx /= n; my /= n;
-                    float ph = tf * 0.35f + f * 2.1f;
-                    float dx = 0.025f * std::sin(ph) + 0.02f * lvl * std::sin(tf * 1.7f + f);
-                    float dy = 0.025f * std::cos(ph * 0.8f) + 0.02f * lvl * std::cos(tf * 1.3f + f);
-                    float rot = 0.06f * std::sin(tf * 0.5f + f * 1.3f) + 0.05f * onset * std::sin(tf * 9.0f + f);
-                    float scale = 0.92f + 0.10f * lvl + 0.06f * onset;
-                    float cr = std::cos(rot), sr = std::sin(rot);
+                for (int li = kAnimLoopIdx[frame]; li < kAnimLoopIdx[frame + 1] && frameLoops < 8; li++) {
+                    int n = kAnimLoopLen[li];
+                    if (vn + n > Engine::kVecLen) break;
+                    int o = kAnimLoopOff[li];
                     for (int i = 0; i < n; i++) {
                         int ip = (i - 1 + n) % n, in_ = (i + 1) % n;
-                        float x = kFloaterXY[(o + i) * 2], y = kFloaterXY[(o + i) * 2 + 1];
-                        // outward normal from the neighbours
-                        float tx = kFloaterXY[(o + in_) * 2] - kFloaterXY[(o + ip) * 2];
-                        float ty = kFloaterXY[(o + in_) * 2 + 1] - kFloaterXY[(o + ip) * 2 + 1];
+                        float x = kAnimXY[(o + i) * 2] / 32767.0f, y = kAnimXY[(o + i) * 2 + 1] / 32767.0f;
+                        float tx = (kAnimXY[(o + in_) * 2] - kAnimXY[(o + ip) * 2]) / 32767.0f;
+                        float ty = (kAnimXY[(o + in_) * 2 + 1] - kAnimXY[(o + ip) * 2 + 1]) / 32767.0f;
                         float tl = std::sqrt(tx * tx + ty * ty) + 1e-6f;
                         float nx = -ty / tl, ny = tx / tl;
-                        // the ripple: two waves running along the outline
                         float u = i * dsp::kTwoPi / n;
-                        float wav = (0.010f + 0.045f * bass) * std::sin(u * 7.0f - tf * 3.0f + f)
-                                  + (0.006f + 0.030f * lvl) * std::sin(u * 13.0f + tf * 4.5f + f * 0.7f);
+                        float wav = (0.004f + 0.035f * bass) * std::sin(u * 7.0f - tf * 3.0f + li)
+                                  + (0.002f + 0.020f * lvl) * std::sin(u * 13.0f + tf * 4.5f + li * 0.7f);
                         x += nx * wav; y += ny * wav;
-                        // breathe + turn about the figure's centre, then drift
-                        float rx = (x - mx) * scale, ry = (y - my) * scale;
-                        x = mx + rx * cr - ry * sr + dx;
-                        y = my + rx * sr + ry * cr + dy;
-                        vx[vn] = x; vy[vn] = y; vn++;
+                        x *= scale; y *= scale;
+                        vx[vn] = x * cs - y * sn; vy[vn] = x * sn + y * cs; vn++;
                     }
-                    o += n;
+                    loopLens[frameLoops++] = n;
                 }
+                gAnimLoops = frameLoops;
+                for (int k = 0; k < frameLoops; k++) gAnimLoopLen[k] = loopLens[k];
             } else if (refresh || vn == 0) {
                 if (gVecMode == 0) {
                     // input L against R, turned 45° so mono is a vertical line
@@ -2263,8 +2259,8 @@ static void drawWaveBody(float w) {
             if (gVecMode == 4) {
                 // each figure is a closed loop; the beam is blanked between them
                 int o2 = 0;
-                for (int f = 0; f < kFloaterPaths && o2 + kFloaterLen[f] <= vn; f++) {
-                    int n = kFloaterLen[f];
+                for (int f = 0; f < gAnimLoops && o2 + gAnimLoopLen[f] <= vn; f++) {
+                    int n = gAnimLoopLen[f];
                     dl->AddPolyline(vp + o2, n, PH(0.06f), ImDrawFlags_Closed, 7.0f);
                     dl->AddPolyline(vp + o2, n, PH(0.22f), ImDrawFlags_Closed, 3.0f);
                     dl->AddPolyline(vp + o2, n, PH(0.95f), ImDrawFlags_Closed, 1.2f);
