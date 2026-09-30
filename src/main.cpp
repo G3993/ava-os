@@ -1947,7 +1947,7 @@ static bool  gScopeFreeze = false;
 static bool gVecBig = false;      // vectorscope: small beside the wave, or large
 static int  gVecMode = 0;         // 0 = input L/R · 1 = HEAD×FEET · 2 = HEART×BELLY · 3 = ROOT×FEET (ring Lissajous)
 // phosphor: the scope traces glow green on a graticule, like the instrument
-static inline ImU32 PH(float a) { return IM_COL32(120, 255, 170, (int)(255 * std::min(1.0f, std::max(0.0f, a)))); }
+static inline ImU32 PH(float a) { return IM_COL32(255, 255, 255, (int)(255 * std::min(1.0f, std::max(0.0f, a)))); }
 static void drawWaveBody(float w) {
     ImDrawList* dl = ImGui::GetWindowDrawList();
     ImVec2 o = ImGui::GetCursorScreenPos();
@@ -2015,7 +2015,7 @@ static void drawWaveBody(float w) {
     };
     // graticule: a dotted grid, 8 divisions across and 4 tall, like a scope screen
     auto graticule = [&](float gx0, float gy0, float gx1, float gy1) {
-        dl->AddRectFilled(ImVec2(gx0, gy0), ImVec2(gx1, gy1), IM_COL32(6, 10, 8, 255), 6);
+        dl->AddRectFilled(ImVec2(gx0, gy0), ImVec2(gx1, gy1), IM_COL32(4, 4, 5, 255), 6);
         float gw = gx1 - gx0, gh = gy1 - gy0;
         int nx = std::max(4, (int)(gw / 40)), ny = std::max(2, (int)(gh / 40));
         for (int i = 1; i < nx; i++) {
@@ -2058,7 +2058,7 @@ static void drawWaveBody(float w) {
             static const char* vecNames[4] = {"L / R", "HEAD x FEET", "HEART x BELLY", "ROOT x FEET"};
             if (vh) { ImGui::SetTooltip("%s\nclick: %s  ·  right-click: next pair", vecNames[gVecMode], gVecBig ? "smaller" : "bigger"); ImGui::SetMouseCursor(ImGuiMouseCursor_Hand); }
             // the screen: a round scope face with graticule rings and axes
-            dl->AddCircleFilled(c, r + 4, IM_COL32(6, 10, 8, 255), 64);
+            dl->AddCircleFilled(c, r + 4, IM_COL32(4, 4, 5, 255), 64);
             if (vh) dl->AddCircleFilled(c, r, PH(0.03f), 64);
             for (int k = 1; k <= 4; k++) dl->AddCircle(c, r * k / 4.0f, PH(k == 4 ? 0.18f : 0.07f), 64, 1.0f);
             dl->AddLine(ImVec2(c.x, c.y - r), ImVec2(c.x, c.y + r), PH(0.16f), 1);
@@ -2140,7 +2140,7 @@ static void drawWaveBody(float w) {
             // its own row under the label so nothing gets clipped
             const float sw = std::max(70.0f, std::min(110.0f, (w - 150) / 4 - 8));
             ImGui::SetCursorScreenPos(ImVec2(o.x, y + 18));
-            if (gScopeTrig) ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.47f, 1.0f, 0.67f, 0.25f));
+            if (gScopeTrig) ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(1, 1, 1, 0.28f));
             if (ImGui::SmallButton("TRIG")) gScopeTrig = !gScopeTrig;
             if (gScopeTrig) ImGui::PopStyleColor();
             if (ImGui::IsItemHovered()) ImGui::SetTooltip("triggered sweep: every refresh starts on a rising zero crossing,\nso a steady tone stands still instead of sliding");
@@ -2160,7 +2160,7 @@ static void drawWaveBody(float w) {
             ImGui::SetNextItemWidth(sw);
             ImGui::SliderFloat("##gain", &gScopeGain, 0.25f, 4.0f, "gain %.2f");
             ImGui::SameLine(0, 6);
-            if (gScopeFreeze) ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.47f, 1.0f, 0.67f, 0.25f));
+            if (gScopeFreeze) ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(1, 1, 1, 0.28f));
             if (ImGui::SmallButton(gScopeFreeze ? "RUN" : "FREEZE")) gScopeFreeze = !gScopeFreeze;
             if (gScopeFreeze) ImGui::PopStyleColor();
         }
