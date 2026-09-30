@@ -46,6 +46,7 @@ static int runSelfTest();
 #include "imgui.h"
 #include "imgui_internal.h"
 #include "floaters_anim.h"
+#include "figures_path.h"
 #include "imgui_impl_glfw.h"
 #include "imgui_impl_opengl3.h"
 #include <GLFW/glfw3.h>
@@ -2013,7 +2014,7 @@ static float gScopeRate = 12.0f;  // refreshes per second; low = calm, 60 = live
 static float gScopeHold = 0.35f;  // frame blending 0..0.95: how much of the last picture stays
 static bool  gScopeFreeze = false;
 static bool gVecBig = false;      // vectorscope: small beside the wave, or large
-static int  gVecMode = 4;         // 0 = input L/R · 1 = HEAD×FEET · 2 = HEART×BELLY · 3 = ROOT×FEET (ring Lissajous) · 4 = FLOATERS (the mark, drawn by the beam)
+static int  gVecMode = 5;         // 0 = input L/R · 1 = HEAD×FEET · 2 = HEART×BELLY · 3 = ROOT×FEET (ring Lissajous) · 4 = FLOATERS (the mark's animation) · 5 = FIGURE (one character warping through shapes)
 static bool gShowSpectrum = false; // MASTER right side: the input wave (default) or the spectrum; click the label
 static int  gAnimLoops = 0, gAnimLoopLen[8];   // the floaters frame on screen: its closed loops
 // phosphor: the scope traces glow green on a graticule, like the instrument
@@ -2161,8 +2162,8 @@ static void drawWaveBody(float w) {
             ImGui::SetCursorScreenPos(ImVec2(c.x - r, c.y - r));
             if (ImGui::InvisibleButton("##vecsize", ImVec2(2 * r, 2 * r))) gVecBig = !gVecBig;
             bool vh = ImGui::IsItemHovered();
-            if (vh && ImGui::IsMouseClicked(1)) gVecMode = (gVecMode + 1) % 5;
-            static const char* vecNames[5] = {"L / R", "HEAD x FEET", "HEART x BELLY", "ROOT x FEET", "FLOATERS"};
+            if (vh && ImGui::IsMouseClicked(1)) gVecMode = (gVecMode + 1) % 6;
+            static const char* vecNames[6] = {"L / R", "HEAD x FEET", "HEART x BELLY", "ROOT x FEET", "FLOATERS", "FIGURE"};
             if (vh) { ImGui::SetTooltip("%s\nclick: %s  ·  right-click: next pair", vecNames[gVecMode], gVecBig ? "smaller" : "bigger"); ImGui::SetMouseCursor(ImGuiMouseCursor_Hand); }
             // the screen: a round scope face with graticule rings and axes
             dl->AddCircleFilled(c, r + 4, IM_COL32(4, 4, 5, 255), 64);
@@ -2181,7 +2182,59 @@ static void drawWaveBody(float w) {
             static float vx[Engine::kVecLen], vy[Engine::kVecLen];
             static int vn = 0;
             static float vpk = 0.05f;
-            if (gVecMode == 4) {
+            if (gVecMode == 5) {
+                // one figure, always becoming another: the beam morphs between
+                // the silhouettes (same start point, same point count, so the
+                // head stays the head), growing and shrinking as it goes.
+                // Mostly it picks a new shape; sometimes it stays and breathes.
+                static int figA = 0, figB = 1;
+                static float scA = 0.5f, scB = 0.9f, phase = 0.0f, dur = 2.5f, hold = 0.0f;
+                static double last = 0;
+                static unsigned rng = 0x9E3779B9u;
+                auto rnd = [&]() { rng ^= rng << 13; rng ^= rng >> 17; rng ^= rng << 5; return (rng & 0xFFFFFF) / 16777216.0f; };
+                float dt = last > 0 ? (float)std::min(0.1, now - last) : 0.0f;
+                last = now;
+                float lvl = gEngine.audioLevel.load(), bass = gEngine.audioBass.load();
+                float onset = gEngine.analyzer.out.onsetFlash.load();
+                if (hold > 0.0f) hold -= dt;
+                else {
+                    phase += dt / dur;
+                    if (phase >= 1.0f) {
+                        phase = 0.0f;
+                        figA = figB; scA = scB;
+                        float r = rnd();
+                        if (r < 0.22f) figB = figA;                                   // sometimes it repeats
+                        else { figB = (int)(rnd() * kFigCount) % kFigCount; if (figB == figA) figB = (figB + 1) % kFigCount; }
+                        // size: mostly a step small -> big or back, sometimes a jump
+                        float r2 = rnd();
+                        scB = r2 < 0.5f ? std::min(1.0f, scA + 0.12f + 0.25f * rnd())
+                            : r2 < 0.8f ? std::max(0.28f, scA - 0.12f - 0.25f * rnd())
+                                        : 0.28f + 0.72f * rnd();
+                        dur = 1.2f + 2.8f * rnd();
+                        hold = rnd() < 0.35f ? 0.4f + 1.6f * rnd() : 0.0f;
+                    }
+                }
+                float e = phase * phase * (3.0f - 2.0f * phase);                       // ease in-out
+                if (figB == figA) e = 0.0f;
+                float sc = (scA + (scB - scA) * e) * (1.0f + 0.05f * lvl + 0.04f * onset);
+                float breathe = 1.0f + 0.03f * std::sin((float)now * 1.4f);
+                vn = kFigLen;
+                for (int i = 0; i < kFigLen; i++) {
+                    float ax = kFigXY[figA][i * 2] / 32767.0f, ay = kFigXY[figA][i * 2 + 1] / 32767.0f;
+                    float bx = kFigXY[figB][i * 2] / 32767.0f, by = kFigXY[figB][i * 2 + 1] / 32767.0f;
+                    float x = ax + (bx - ax) * e, y = ay + (by - ay) * e;
+                    // a little of the music runs along the outline
+                    int ip = (i - 1 + kFigLen) % kFigLen, in_ = (i + 1) % kFigLen;
+                    float tx = (kFigXY[figA][in_ * 2] - kFigXY[figA][ip * 2]) / 32767.0f;
+                    float ty = (kFigXY[figA][in_ * 2 + 1] - kFigXY[figA][ip * 2 + 1]) / 32767.0f;
+                    float tl = std::sqrt(tx * tx + ty * ty) + 1e-6f;
+                    float u = i * dsp::kTwoPi / kFigLen;
+                    float wav = (0.003f + 0.030f * bass) * std::sin(u * 6.0f - (float)now * 2.5f);
+                    x += -ty / tl * wav; y += tx / tl * wav;
+                    vx[i] = x * sc * breathe; vy[i] = y * sc * breathe;
+                }
+                gAnimLoops = 1; gAnimLoopLen[0] = kFigLen;
+            } else if (gVecMode == 4) {
                 // the floaters: the mark's own animation (12 s loop, 30 fps),
                 // each frame's outlines traced as beam paths. The whole mark
                 // turns very slowly, the music adds a ripple along every
@@ -2256,7 +2309,7 @@ static void drawWaveBody(float w) {
             }
             // beam: a real CRT spot is brighter where it moves slowly and
             // fades where it whips across, and the oldest samples fade too
-            if (gVecMode == 4) {
+            if (gVecMode == 4 || gVecMode == 5) {
                 // each figure is a closed loop; the beam is blanked between them
                 int o2 = 0;
                 for (int f = 0; f < gAnimLoops && o2 + gAnimLoopLen[f] <= vn; f++) {
@@ -2277,7 +2330,7 @@ static void drawWaveBody(float w) {
                 }
             }
             if (gFontSmall) ImGui::PushFont(gFontSmall);
-            if (gVecMode > 0 && gVecMode != 4) { ImVec2 ns = ImGui::CalcTextSize(vecNames[gVecMode]); dl->AddText(ImVec2(c.x - ns.x / 2, c.y + r - 4), PH(0.5f), vecNames[gVecMode]); }
+            if (gVecMode > 0 && gVecMode < 4) { ImVec2 ns = ImGui::CalcTextSize(vecNames[gVecMode]); dl->AddText(ImVec2(c.x - ns.x / 2, c.y + r - 4), PH(0.5f), vecNames[gVecMode]); }
             if (gFontSmall) ImGui::PopFont();
             if (gVecMode == 0) {
                 if (gFontSmall) ImGui::PushFont(gFontSmall);
