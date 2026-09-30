@@ -1427,11 +1427,15 @@ static void drawTunerBody() {
     // ── the body, top and centre: the octagon, each ring numbered like its
     //    orb, lit as it moves, with a hairline dial of ticks around it ──
     ImVec2 top = ImGui::GetCursorScreenPos();
-    const float oR = 92.0f;
-    ImVec2 oc(cxm, top.y + 18 + oR);
+    const float oR = 88.0f;
+    ImVec2 oc(cxm, top.y + 14 + oR);
+    const int ringZone[4] = {ROOT, BELLY, HEART, HEAD};
+    const float bounds[5] = {0.36f, 0.50f, 0.65f, 0.80f, 0.96f};
+    // which zone is "hot": hovered, dragged, or the column under the mouse
+    static int sHotPrev = -1;                       // last frame's hot zone (columns are drawn last)
+    int hotZ = gTuneDrag >= 0 ? gTuneDrag : sHotPrev;
+    int hotNow = -1;
     {
-        const int ringZone[4] = {ROOT, BELLY, HEART, HEAD};
-        const float bounds[5] = {0.36f, 0.50f, 0.65f, 0.80f, 0.96f};
         auto vert = [&](float r, int k) {
             float a = -dsp::kPi / 2 + dsp::kPi / 8 + k * dsp::kPi / 4;
             return ImVec2(oc.x + r * oR * std::cos(a), oc.y + r * oR * std::sin(a));
@@ -1452,9 +1456,9 @@ static void drawTunerBody() {
             float lvl = gEngine.meter[2 + z].load();
             ImVec2 outer[8], inner[8];
             for (int k = 0; k < 8; k++) { outer[k] = vert(bounds[ring + 1], k); inner[k] = vert(bounds[ring], k); }
-            dl->AddConvexPolyFilled(outer, 8, W(0.10f + 0.55f * lvl + (gTuneDrone[z] ? 0.25f : 0.0f)));
+            dl->AddConvexPolyFilled(outer, 8, W(0.10f + 0.55f * lvl + (gTuneDrone[z] ? 0.25f : 0.0f) + (hotZ == z ? 0.14f : 0.0f)));
             dl->AddConvexPolyFilled(inner, 8, IM_COL32(16, 16, 18, 255));
-            dl->AddPolyline(outer, 8, W(0.06f), ImDrawFlags_Closed, 1.0f);
+            dl->AddPolyline(outer, 8, W(hotZ == z ? 0.35f : 0.06f), ImDrawFlags_Closed, 1.0f);
             int num = 0;
             for (int i = 0; i < NZONES; i++) if (kTuneOrder[i] == z) num = i + 1;
             char b[4]; snprintf(b, sizeof b, "%d", num);
@@ -1467,7 +1471,7 @@ static void drawTunerBody() {
             float lvl = gEngine.meter[2 + FEET].load();
             ImVec2 pts[8];
             for (int k = 0; k < 8; k++) pts[k] = vert(bounds[0], k);
-            dl->AddConvexPolyFilled(pts, 8, W(0.25f + 0.6f * lvl + (gTuneDrone[FEET] ? 0.15f : 0.0f)));
+            dl->AddConvexPolyFilled(pts, 8, W(0.25f + 0.6f * lvl + (gTuneDrone[FEET] ? 0.15f : 0.0f) + (hotZ == FEET ? 0.14f : 0.0f)));
             ImVec2 ts = ImGui::CalcTextSize("1");
             dl->AddText(ImVec2(oc.x - ts.x / 2, oc.y - ts.y / 2), IM_COL32(0, 0, 0, 220), "1");
         }
@@ -1475,9 +1479,9 @@ static void drawTunerBody() {
     }
 
     // ── ruler canvas under the body ──
-    ImGui::SetCursorScreenPos(ImVec2(x0, oc.y + oR * 1.16f + 10));
+    ImGui::SetCursorScreenPos(ImVec2(x0, oc.y + oR * 1.16f + 4));
     ImVec2 o = ImGui::GetCursorScreenPos();
-    const float canvasH = 160.0f;
+    const float canvasH = 150.0f;
     ImGui::InvisibleButton("##ruler", ImVec2(w, canvasH));
     bool canvasHover = ImGui::IsItemHovered();
     const float rulerW = std::min(w - 52.0f, 760.0f);
@@ -1485,8 +1489,8 @@ static void drawTunerBody() {
     const float lnRange = std::log(kTuneMax / kTuneMin);
     auto hzX = [&](float hz) { return rx0 + rw * std::log(hz / kTuneMin) / lnRange; };
     auto xHz = [&](float x) { return kTuneMin * std::exp(lnRange * (x - rx0) / rw); };
-    float ry = o.y + 52.0f;   // ruler line
-    float oy = ry + 58.0f;    // orb centre line
+    float ry = o.y + 46.0f;   // ruler line
+    float oy = ry + 56.0f;    // orb centre line
     const float orbR = 15.0f;
 
     // live energy: a bump at each zone's frequency, height = its meter
@@ -1534,6 +1538,8 @@ static void drawTunerBody() {
             if (d < best) { best = d; hoverZ = z; }
         }
     }
+    if (hoverZ >= 0) { hotZ = hoverZ; hotNow = hoverZ; }
+    if (gTuneDrag >= 0) hotNow = gTuneDrag;
     if (hoverZ >= 0 || gTuneDrag >= 0) ImGui::SetMouseCursor(ImGuiMouseCursor_Hand);
     if (hoverZ >= 0 && ImGui::IsMouseClicked(0)) {
         gTuneDrag = hoverZ;
@@ -1590,12 +1596,43 @@ static void drawTunerBody() {
         if (gFontSmall) ImGui::PopFont();
     }
 
+    // strings: each orb is tied to its ring on the body above, so pitch,
+    // ring and readout read as one instrument
+    const float tableW = std::min(w, 5 * 150.0f), colW = tableW / NZONES;
+    ImVec2 t0(cxm - tableW / 2, o.y + canvasH + 4);
+    for (int i = 0; i < NZONES; i++) {
+        int z = kTuneOrder[i];
+        float x = hzX(gTuneHz[z]);
+        float lvl = gEngine.meter[2 + z].load();
+        bool hot = hotZ == z || gTuneDrone[z];
+        // where the string leaves the body: on this ring's outer edge, on the
+        // side facing the orb (the centre pad hangs from its own bottom edge)
+        float rb = z == FEET ? bounds[0] : bounds[1 + (z == ROOT ? 0 : z == BELLY ? 1 : z == HEART ? 2 : 3)];
+        ImVec2 dir(x - oc.x, oy - oc.y);
+        float dn = std::sqrt(dir.x * dir.x + dir.y * dir.y);
+        dir.x /= dn; dir.y /= dn;
+        // octagon edge distance along dir (flat sides), not a circle
+        float ang = std::atan2(dir.y, dir.x) + dsp::kPi / 2 - dsp::kPi / 8;
+        ang -= std::floor(ang / (dsp::kPi / 4)) * (dsp::kPi / 4);
+        float edge = rb * oR * std::cos(dsp::kPi / 8) / std::cos(ang - dsp::kPi / 8);
+        ImVec2 a(oc.x + dir.x * edge, oc.y + dir.y * edge);
+        ImVec2 b(x, oy - orbR - 2);
+        ImVec2 c1(a.x, a.y + (b.y - a.y) * 0.45f), c2(b.x, b.y - (b.y - a.y) * 0.45f);
+        float al = hot ? 0.55f : 0.10f + 0.35f * lvl;
+        dl->AddBezierCubic(a, c1, c2, b, W(al), hot ? 1.4f : 1.0f);
+        // and down to its readout column
+        float cx = t0.x + colW * i + colW / 2;
+        ImVec2 d(x, oy + orbR + 2), e(cx, t0.y + 2);
+        ImVec2 d1(d.x, d.y + (e.y - d.y) * 0.5f), d2(e.x, e.y - (e.y - d.y) * 0.5f);
+        dl->AddBezierCubic(d, d1, d2, e, W(hot ? 0.45f : 0.10f), hot ? 1.4f : 1.0f);
+    }
+
     // orbs on stems, FEET drawn first (1) … HEAD last (5)
     for (int i = 0; i < NZONES; i++) {
         int z = kTuneOrder[i];
         float x = hzX(gTuneHz[z]);
         float lvl = gEngine.meter[2 + z].load();
-        bool drone = gTuneDrone[z], hov = hoverZ == z || gTuneDrag == z;
+        bool drone = gTuneDrone[z], hov = hotZ == z;
         dl->AddLine(ImVec2(x, ry), ImVec2(x, oy - orbR), W(0.22f + 0.5f * lvl), 1.0f);
         if (lvl > 0.04f) dl->AddCircleFilled(ImVec2(x, oy), orbR + 4 + 10 * lvl, W(0.16f * lvl));
         float a = drone ? 0.95f : 0.30f + 0.55f * lvl;
@@ -1614,9 +1651,8 @@ static void drawTunerBody() {
     }
 
     // ── readouts, centred: five columns, each centred on its own axis ──
-    const float tableW = std::min(w, 5 * 150.0f), colW = tableW / NZONES;
-    ImVec2 t0(cxm - tableW / 2, o.y + canvasH + 12);
     const float tableH = 118.0f;
+    t0.y += 8;
     auto centred = [&](const char* s, float cx, float y, ImU32 col) {
         ImVec2 ts = ImGui::CalcTextSize(s);
         dl->AddText(ImVec2(cx - ts.x / 2, y), col, s);
@@ -1626,6 +1662,9 @@ static void drawTunerBody() {
         int z = kTuneOrder[i];
         float cl = t0.x + colW * i, cx = cl + colW / 2;
         if (i) dl->AddLine(ImVec2(cl, t0.y + 4), ImVec2(cl, t0.y + tableH - 8), W(0.07f), 1.0f);
+        bool colHot = ImGui::IsMouseHoveringRect(ImVec2(cl, t0.y), ImVec2(cl + colW, t0.y + tableH));
+        if (colHot && hotNow < 0) hotNow = z;                      // lights ring + strings next frame
+        if (hotZ == z) dl->AddRectFilled(ImVec2(cl + 4, t0.y - 2), ImVec2(cl + colW - 4, t0.y + tableH - 6), W(0.035f), 8);
         char buf[48];
         if (gFontSmall) ImGui::PushFont(gFontSmall);
         snprintf(buf, sizeof(buf), "%d  %s", i + 1, kZoneNames[z]);
@@ -1679,6 +1718,7 @@ static void drawTunerBody() {
         if (gFontSmall) ImGui::PopFont();
         ImGui::PopID();
     }
+    sHotPrev = hotNow;
     ImGui::SetCursorScreenPos(ImVec2(x0, t0.y + tableH + 6));
 
     if (gFontSmall) ImGui::PushFont(gFontSmall);
@@ -3826,7 +3866,7 @@ int main(int argc, char** argv) {
                 drawVisualBody(win, bw);
             } else {
                 // ARTIFACT sub-tabs: Sounds · Tuner · MIDI · Play
-                static const char* subs[4] = {"Sounds", "Tuner", "MIDI", "Play"};
+                static const char* subs[4] = {"Sounds", "Tune", "MIDI", "Play"};
                 subNav(subs, 4, &gArtifactTab, bw);
                 if (gArtifactTab == 0) drawSoundsBody(bw);
                 else if (gArtifactTab == 1) drawTunerBody();
