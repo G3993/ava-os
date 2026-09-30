@@ -375,4 +375,5 @@ public:
     std::atomic<float> audioSubBand{0}, audioLowMidBand{0};
 
     int scopeDecim_ = 0;
+    float scopeLP1_ = 0, scopeLP2_ = 0;   // input scope anti-alias lowpass
 };

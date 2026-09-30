@@ -252,11 +252,19 @@ void Engine::process(const float* inL, const float* inR, float** out, int n) {
         // scope for UI
         bool doScope = false;
         int scopeIdx = 0;
+        // the scope runs at 1/32 rate; without a filter the treble aliases
+        // into spikes, so the tap is low-passed (~300 Hz, two poles) first
+        // and the wave reads as the music's body, not its hiss
+        {
+            const float sc = 0.038f;   // ~300 Hz one-pole at 48 k
+            scopeLP1_ += (mono - scopeLP1_) * sc;
+            scopeLP2_ += (scopeLP1_ - scopeLP2_) * sc;
+        }
         if (++scopeDecim_ >= 32) {
             scopeDecim_ = 0;
             doScope = true;
             scopeIdx = scopeW.load(std::memory_order_relaxed);
-            scope[scopeIdx] = mono;
+            scope[scopeIdx] = scopeLP2_;
             scopeW.store((scopeIdx + 1) % kScopeLen, std::memory_order_relaxed);
         }
 
