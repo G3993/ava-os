@@ -3202,12 +3202,41 @@ int main(int argc, char** argv) {
                     for (auto& d : devicesSnapshot())
                         if (d.id == gDevices[gSelDevice].id) { gDevPresent = true; break; }
             }
-            ImGui::SetNextWindowPos(ImVec2(W_ - 542, 66), ImGuiCond_FirstUseEver);
-            ImGui::SetNextWindowSize(ImVec2(520, 0));
-            if (ImGui::Begin("SETTINGS", &gShowHealth,
-                             ImGuiWindowFlags_NoCollapse | ImGuiWindowFlags_NoResize |
-                                 ImGuiWindowFlags_AlwaysAutoResize)) {
+            // Settings takes over the whole right card: same rounded card,
+            // same place, its own header row with a close ×, scrolls inside
+            {
+                float rW = std::min(700.0f, W_ * 0.46f), lW = W_ - rW;
+                ImGui::SetNextWindowPos(ImVec2(lW - 6, 18), ImGuiCond_Always);
+                ImGui::SetNextWindowSize(ImVec2(rW - 18, H_ - 36), ImGuiCond_Always);
+            }
+            ImGui::PushStyleVar(ImGuiStyleVar_WindowRounding, 22.0f);
+            ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(16, 20));   // x kept small: the rows use absolute SameLine offsets
+            ImGui::PushStyleVar(ImGuiStyleVar_WindowBorderSize, 1.0f);
+            ImGui::PushStyleColor(ImGuiCol_WindowBg, ImVec4(16 / 255.0f, 16 / 255.0f, 18 / 255.0f, 1.0f));
+            ImGui::PushStyleColor(ImGuiCol_Border, ImVec4(1, 1, 1, 0.07f));
+            bool settingsOpen = ImGui::Begin("SETTINGS", nullptr,
+                             ImGuiWindowFlags_NoCollapse | ImGuiWindowFlags_NoResize | ImGuiWindowFlags_NoMove |
+                                 ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoBringToFrontOnFocus);
+            ImGui::PopStyleColor(2);
+            ImGui::PopStyleVar(3);
+            if (settingsOpen) {
+                ImGui::BringWindowToDisplayFront(ImGui::GetCurrentWindow());
                 ImDrawList* hdl = ImGui::GetWindowDrawList();
+                {
+                    // header: SETTINGS · ×
+                    ImVec2 hp = ImGui::GetCursorScreenPos();
+                    float hw = ImGui::GetContentRegionAvail().x;
+                    ImGui::Dummy(ImVec2(hw, 30));
+                    hdl->AddText(ImVec2(hp.x, hp.y + 4), W(0.95f), "SETTINGS");
+                    ImVec2 xc(hp.x + hw - 12, hp.y + 13);
+                    ImGui::SetCursorScreenPos(ImVec2(xc.x - 12, xc.y - 12));
+                    if (ImGui::InvisibleButton("##closeSettings", ImVec2(24, 24))) gShowHealth = false;
+                    bool xh = ImGui::IsItemHovered();
+                    if (xh) hdl->AddCircleFilled(xc, 12, W(0.08f), 24);
+                    hdl->AddLine(ImVec2(xc.x - 4.5f, xc.y - 4.5f), ImVec2(xc.x + 4.5f, xc.y + 4.5f), W(xh ? 0.95f : 0.5f), 1.5f);
+                    hdl->AddLine(ImVec2(xc.x - 4.5f, xc.y + 4.5f), ImVec2(xc.x + 4.5f, xc.y - 4.5f), W(xh ? 0.95f : 0.5f), 1.5f);
+                    ImGui::SetCursorScreenPos(ImVec2(hp.x, hp.y + 34));
+                }
                 bool devOk = gSelDevice >= 0 && gSelDevice < (int)gDevices.size();
                 auto head = [&](const char* t, bool first = false) {
                     if (!first) ImGui::Dummy(ImVec2(0, 10));
@@ -3365,7 +3394,7 @@ int main(int argc, char** argv) {
                     // STEREO: the centre (feet) has no side of its own; pick one
                     int sc = gEngine.params.stereoCenter.load();
                     ImGui::TextDisabled("STEREO centre");
-                    ImGui::SameLine(120);
+                    ImGui::SameLine(150);
                     if (sc == 0) ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(1, 1, 1, 0.28f));
                     if (ImGui::SmallButton("LEFT")) gEngine.params.stereoCenter.store(0);
                     if (sc == 0) ImGui::PopStyleColor();
