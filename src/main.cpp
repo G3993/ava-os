@@ -2188,7 +2188,7 @@ static void drawWaveBody(float w) {
                 // head stays the head), growing and shrinking as it goes.
                 // Mostly it picks a new shape; sometimes it stays and breathes.
                 static int figA = 0, figB = 1;
-                static float scA = 0.5f, scB = 0.9f, phase = 0.0f, dur = 2.5f, hold = 0.0f;
+                static float scA = 0.8f, scB = 0.84f, phase = 0.0f, dur = 2.5f, hold = 0.0f;
                 static double last = 0;
                 static unsigned rng = 0x9E3779B9u;
                 auto rnd = [&]() { rng ^= rng << 13; rng ^= rng >> 17; rng ^= rng << 5; return (rng & 0xFFFFFF) / 16777216.0f; };
@@ -2214,17 +2214,18 @@ static void drawWaveBody(float w) {
                         else { figB = (int)(rnd() * kFigCount) % kFigCount; if (figB == figA) figB = (figB + 1) % kFigCount; }
                         // size: mostly a step small -> big or back, sometimes a jump
                         float r2 = rnd();
-                        scB = r2 < 0.5f ? std::min(1.0f, scA + 0.12f + 0.25f * rnd())
-                            : r2 < 0.8f ? std::max(0.28f, scA - 0.12f - 0.25f * rnd())
-                                        : 0.28f + 0.72f * rnd();
+                        // barely: it lives between 0.72 and 0.88 of the screen
+                        scB = r2 < 0.5f ? std::min(0.88f, scA + 0.03f + 0.05f * rnd())
+                            : r2 < 0.8f ? std::max(0.72f, scA - 0.03f - 0.05f * rnd())
+                                        : 0.72f + 0.16f * rnd();
                         dur = 1.2f + 2.8f * rnd();
                         hold = rnd() < 0.35f ? 0.4f + 1.6f * rnd() : 0.0f;
                     }
                 }
                 float e = phase * phase * (3.0f - 2.0f * phase);                       // ease in-out
                 if (figB == figA) e = 0.0f;
-                float sc = (scA + (scB - scA) * e) * (1.0f + 0.05f * lvl + 0.04f * onset);
-                float breathe = 1.0f + 0.03f * std::sin((float)now * 1.4f);
+                float sc = (scA + (scB - scA) * e) * (1.0f + 0.02f * lvl + 0.02f * onset);
+                float breathe = 1.0f + 0.012f * std::sin((float)now * 1.4f);
                 vn = kFigLen;
                 for (int i = 0; i < kFigLen; i++) {
                     float ax = kFigXY[figA][i * 2] / 32767.0f, ay = kFigXY[figA][i * 2 + 1] / 32767.0f;
