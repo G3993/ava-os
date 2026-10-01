@@ -67,7 +67,7 @@ static std::vector<OutDevice> gDevices;
 static int gSelDevice = -1;
 static int gActiveTab = 0;
 static int gMode = 0;        // right card: 0 Audio · 1 Visual · 2 Artifact
-static int gArtifactTab = 0; // Artifact: 0 Sounds · 1 Tuner · 2 MIDI · 3 Play
+static int gArtifactTab = 0; // Artifact: 0 Tune · 1 Sounds · 3 Play (stems, parked)
 static float gZoneSlider[NZONES] = {0.65f, 0.6f, 0.8f, 0.75f, 0.75f};
 static float gEdgeFade = 0.0f; // vignette on the shader/projector output
 static float gMasterVol = 1.0f;
@@ -4159,11 +4159,12 @@ int main(int argc, char** argv) {
             } else {
                 // ARTIFACT sub-tabs: Sounds · Tune (MIDI lives in Settings; the
                 // stem Play page is parked — reachable only by dropping a folder)
-                static const char* subs[2] = {"Sounds", "Tune"};
+                // Tune first, then Sounds (tab 0 = Tune, 1 = Sounds, 3 = Play)
+                static const char* subs[2] = {"Tune", "Sounds"};
                 if (gArtifactTab == 2) gArtifactTab = 0;
                 subNav(subs, 2, &gArtifactTab, bw);
-                if (gArtifactTab == 0) drawSoundsBody(bw);
-                else if (gArtifactTab == 1) drawTunerBody();
+                if (gArtifactTab == 0) drawTunerBody();
+                else if (gArtifactTab == 1) drawSoundsBody(bw);
                 else drawPlayBody(bw);
             }
             ImGui::EndChild();
