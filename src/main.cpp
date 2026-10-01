@@ -2512,7 +2512,7 @@ static void drawWaveBody(float w, bool audio = false) {
         // the lanes take whatever height the card has left; on the Audio page
         // they're a full 150 and the page scrolls down to the engine grid
         float roomH = ImGui::GetWindowPos().y + ImGui::GetWindowSize().y - top - 16;
-        const float lane = audio ? 150.0f : std::max(44.0f, std::min(110.0f, (roomH - 4 * laneGap) / NZONES));
+        const float lane = audio ? 76.0f : std::max(44.0f, std::min(110.0f, (roomH - 4 * laneGap) / NZONES));
         const float volH = audio ? 16.0f : 0.0f;              // the volume strip under the wave
         for (int z = 0; z < NZONES; z++) {
             float ly = top + z * (lane + laneGap), mid = ly + (lane - volH) / 2 + 1, amp = (lane - volH) * 0.42f;
