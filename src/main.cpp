@@ -2243,24 +2243,24 @@ static void drawWaveBody(float w, bool audio = false) {
         for (int i = 0; i < span; i++) pk = std::max(pk, std::fabs(buf[(newest + i) % N]));
         return pk;
     };
-    // graticule: a dotted grid, 8 divisions across and 4 tall, like a scope screen
+    // graticule: a dotted grid — a dot at every crossing of a fine lattice,
+    // brighter where the major divisions cross, no lines
     auto graticule = [&](float gx0, float gy0, float gx1, float gy1) {
         dl->AddRectFilled(ImVec2(gx0, gy0), ImVec2(gx1, gy1), IM_COL32(4, 4, 5, 255), 6);
         float gw = gx1 - gx0, gh = gy1 - gy0;
         int nx = std::max(4, (int)(gw / 40)), ny = std::max(2, (int)(gh / 40));
-        for (int i = 1; i < nx; i++) {
-            float x = gx0 + gw * i / nx;
-            dl->AddLine(ImVec2(x, gy0), ImVec2(x, gy1), PH(i == nx / 2 ? 0.14f : 0.06f), 1.0f);
+        const int sub = 4;
+        for (int i = 0; i <= nx * sub; i++) {
+            float x = gx0 + gw * i / (nx * sub);
+            bool mx = i % sub == 0;
+            for (int j = 0; j <= ny * sub; j++) {
+                float yy = gy0 + gh * j / (ny * sub);
+                bool my = j % sub == 0;
+                float a = (mx && my) ? 0.26f : (mx || my) ? 0.12f : 0.06f;
+                dl->AddRectFilled(ImVec2(x - 0.5f, yy - 0.5f), ImVec2(x + 0.5f, yy + 0.5f), PH(a));
+            }
         }
-        for (int j = 1; j < ny; j++) {
-            float yy = gy0 + gh * j / ny;
-            dl->AddLine(ImVec2(gx0, yy), ImVec2(gx1, yy), PH(j == ny / 2 ? 0.14f : 0.06f), 1.0f);
-        }
-        // fine ticks on the centre lines
-        float cy = gy0 + gh / 2, cx = gx0 + gw / 2;
-        for (int i = 1; i < nx * 5; i++) { float x = gx0 + gw * i / (nx * 5); dl->AddLine(ImVec2(x, cy - 2), ImVec2(x, cy + 2), PH(0.12f), 1.0f); }
-        for (int j = 1; j < ny * 5; j++) { float yy = gy0 + gh * j / (ny * 5); dl->AddLine(ImVec2(cx - 2, yy), ImVec2(cx + 2, yy), PH(0.12f), 1.0f); }
-        dl->AddRect(ImVec2(gx0, gy0), ImVec2(gx1, gy1), PH(0.16f), 6);
+        dl->AddRect(ImVec2(gx0, gy0), ImVec2(gx1, gy1), PH(0.14f), 6);
     };
     // ── MASTER · Input ──
     {
