@@ -2107,9 +2107,9 @@ static void drawWaveBody(float w) {
     // ── MASTER · Input ──
     {
         label(gShowSpectrum ? "MASTER   ·   Spectrum" : "MASTER   ·   Input", y);
-        float hh = gVecBig ? std::min(w * 0.6f, 330.0f) : 150.0f, top = y + 18;
-        const float vs = hh;                       // vectorscope square on the left
-        float wx0 = o.x + vs + 10;                 // wave starts where the scope ends
+        float hh = gVecBig ? std::min(w * 0.6f, 330.0f) : 170.0f, top = y + 18;
+        const float vs = hh;                       // the XY square, centred over the wave
+        float wx0 = o.x;                           // the wave runs the whole width; the figure overlays it
         dl->AddRectFilled(ImVec2(o.x, top), ImVec2(o.x + w, top + hh), IM_COL32(8, 8, 9, 255), 12);
         graticule(wx0 + 4, top + 6, o.x + w - 8, top + hh - 6);
         if (gShowSpectrum) {
@@ -2157,8 +2157,8 @@ static void drawWaveBody(float w) {
         // ── vectorscope: L against R, turned 45° so mono is a vertical line,
         //    width opens it into a cloud; the last ~21 ms of samples ──
         {
-            ImVec2 c(o.x + vs / 2, top + hh / 2);
-            float r = vs * 0.42f;
+            ImVec2 c(o.x + w / 2, top + hh / 2);
+            float r = vs * 0.44f;
             // click the scope to grow / shrink it
             ImGui::SetCursorScreenPos(ImVec2(c.x - r, c.y - r));
             if (ImGui::InvisibleButton("##vecsize", ImVec2(2 * r, 2 * r))) gVecBig = !gVecBig;
@@ -2185,7 +2185,7 @@ static void drawWaveBody(float w) {
                     ImVec2 q[4] = {
                         ImVec2(org.x + slice[k][1] * sc, org.y + ty * sc), ImVec2(org.x + slice[k][2] * sc, org.y + ty * sc),
                         ImVec2(org.x + sliceBot[k][1] * sc, org.y + by * sc), ImVec2(org.x + sliceBot[k][0] * sc, org.y + by * sc)};
-                    roundedPolyFill(dl, q, 4, 12.0f * sc, IM_COL32(255, 255, 255, vh ? 30 : 22), IM_COL32(255, 255, 255, 40), 1.0f);
+                    roundedPolyFill(dl, q, 4, 12.0f * sc, IM_COL32(255, 255, 255, vh ? 26 : 18), IM_COL32(255, 255, 255, 34), 1.0f);
                 }
             }
             // the picture: unit-square XY points, refreshed at the scope rate
