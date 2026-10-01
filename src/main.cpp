@@ -2124,7 +2124,8 @@ static void drawLinesVisual(ImDrawList* dl, ImVec2 b0, ImVec2 b1) {
 // the same card as MASTER (172 tall, title inside), the shader filling its
 // band edge to edge — cropped top and bottom, like a banner. With no shader
 // chosen the band shows the lines visualiser.
-static float drawShaderCard(ImDrawList* dl, ImVec2 o, float w, float y) {
+static bool gGalleryOpen = true;   // Shaders: the gallery of stills, folded once a shader is chosen
+static float drawShaderCard(ImDrawList* dl, ImVec2 o, float w, float y, bool galleryButton = false) {
     const float hh = 172, cy0 = y + 36, cy1 = y + hh - 8;
     dl->AddRectFilled(ImVec2(o.x, y), ImVec2(o.x + w, y + hh), IM_COL32(8, 8, 9, 255), 14);
     dl->AddRect(ImVec2(o.x, y), ImVec2(o.x + w, y + hh), W(0.06f), 14);
@@ -2132,6 +2133,17 @@ static float drawShaderCard(ImDrawList* dl, ImVec2 o, float w, float y) {
     if (gFontSmall) ImGui::PushFont(gFontSmall);
     dl->AddText(ImVec2(o.x + 84, y + 14), W(0.32f), gShaders.active() ? gShaders.currentTitle() : "Lines  ·  pick a shader below");
     if (gFontSmall) ImGui::PopFont();
+    if (galleryButton) {
+        // GALLERY, top right of the card: opens / folds the stills below
+        if (gFontSmall) ImGui::PushFont(gFontSmall);
+        float bw = ImGui::CalcTextSize("GALLERY").x + 24;
+        ImGui::SetCursorScreenPos(ImVec2(o.x + w - 12 - bw, y + 7));
+        if (gGalleryOpen) ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(1, 1, 1, 0.22f));
+        if (ImGui::Button("GALLERY", ImVec2(bw, 22))) gGalleryOpen = !gGalleryOpen;
+        if (gGalleryOpen) ImGui::PopStyleColor();
+        if (ImGui::IsItemHovered()) ImGui::SetTooltip(gGalleryOpen ? "fold the gallery away" : "open the gallery");
+        if (gFontSmall) ImGui::PopFont();
+    }
     ImVec2 b0(o.x + 12, cy0), b1(o.x + w - 12, cy1);
     dl->AddRectFilled(b0, b1, IM_COL32(0, 0, 0, 255), 8);
     if (gShaders.active() && gShaders.outputTexture()) {
@@ -2584,7 +2596,7 @@ static void drawShadersBody(float w) {
     ImDrawList* dl = ImGui::GetWindowDrawList();
     ImVec2 o = ImGui::GetCursorScreenPos();
     {
-        float ph = drawShaderCard(dl, o, w, o.y + 6);
+        float ph = drawShaderCard(dl, o, w, o.y + 6, true);
         ImGui::SetCursorScreenPos(ImVec2(o.x, o.y + 6 + ph + 14));
         // universal audio activity: scales what every shader hears
         if (gFontSmall) ImGui::PushFont(gFontSmall);
@@ -2599,31 +2611,14 @@ static void drawShadersBody(float w) {
     int cooking = cookThumbnails();
     // the gallery folds away once a shader is chosen so its parameters get
     // the room; the header row reopens it
-    static bool galleryOpen = true;
+    bool& galleryOpen = gGalleryOpen;
     static bool wasActive = false;
     if (gShaders.active() && !wasActive) galleryOpen = false;
     wasActive = gShaders.active();
     static char filter[64] = "";
-    {
-        // a chevron: down = open, right = folded
-        ImVec2 cp = ImGui::GetCursorScreenPos();
-        if (ImGui::InvisibleButton("##galtoggle", ImVec2(22, 22))) galleryOpen = !galleryOpen;
-        bool gh = ImGui::IsItemHovered();
-        if (gh) ImGui::SetTooltip(galleryOpen ? "fold the gallery away" : "open the gallery");
-        ImU32 cc = W(gh ? 0.95f : 0.5f);
-        ImVec2 cm(cp.x + 11, cp.y + 11);
-        if (galleryOpen) {
-            dl->AddLine(ImVec2(cm.x - 5, cm.y - 2.5f), ImVec2(cm.x, cm.y + 2.5f), cc, 1.6f);
-            dl->AddLine(ImVec2(cm.x, cm.y + 2.5f), ImVec2(cm.x + 5, cm.y - 2.5f), cc, 1.6f);
-        } else {
-            dl->AddLine(ImVec2(cm.x - 2.5f, cm.y - 5), ImVec2(cm.x + 2.5f, cm.y), cc, 1.6f);
-            dl->AddLine(ImVec2(cm.x + 2.5f, cm.y), ImVec2(cm.x - 2.5f, cm.y + 5), cc, 1.6f);
-        }
-        if (galleryOpen) {
-            ImGui::SameLine(0, 10);
-            ImGui::SetNextItemWidth(-1);
-            ImGui::InputTextWithHint("##f", "search", filter, sizeof(filter));
-        }
+    if (galleryOpen) {
+        ImGui::SetNextItemWidth(-1);
+        ImGui::InputTextWithHint("##f", "search", filter, sizeof(filter));
     }
     auto lower = [](std::string s) { for (auto& c : s) c = (char)tolower(c); return s; };
     std::string f = lower(filter);
