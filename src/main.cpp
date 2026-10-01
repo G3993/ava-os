@@ -2405,8 +2405,12 @@ static void drawWaveBody(float w, bool audio = false) {
                 float lv = gEngine.meter[2 + z].load();
                 dl->AddLine(ImVec2(o.x + 68, ly + lane - 6), ImVec2(o.x + 68 + (w - 76) * lv, ly + lane - 6), LB(0.8f), 1.5f);
                 if (gFontSmall) ImGui::PushFont(gFontSmall);
+                // V = the volume, S = the signal (the live level line under it)
                 char vt[8]; snprintf(vt, sizeof vt, "%.0f", v * 100);
+                ImVec2 vs = ImGui::CalcTextSize(vt);
                 dl->AddText(ImVec2(o.x + 12, ly + lane - volH + 7), W(0.5f), vt);
+                dl->AddText(ImVec2(o.x + 12 + vs.x + 5, ly + lane - volH + 7), LB(0.55f), "V");
+                dl->AddText(ImVec2(o.x + 12, ly + lane - 13), W(0.32f), "S");
                 if (gFontSmall) ImGui::PopFont();
             }
             // auto-scale each ring to its own recent peak so every lane draws a full wave
