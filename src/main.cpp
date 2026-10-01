@@ -2465,9 +2465,17 @@ static void drawWaveBody(float w, bool audio = false) {
     // ── RINGS · Output, with zoom and gain on the right of the header ──
     {
         label("RINGS   ·   Output", y);
-        // scope controls, right of the header: TRIG · time · rate · hold · gain · FREEZE
-        if (gFontSmall) ImGui::PushFont(gFontSmall);
+        // scope controls: TRIG · time · rate · hold · gain · FREEZE (on the
+        // Audio page they fold behind the label — click it)
+        static bool showCtl = false;
         {
+            ImGui::SetCursorScreenPos(ImVec2(o.x, y - 2));
+            if (ImGui::InvisibleButton("##ringsctl", ImVec2(150, 18))) showCtl = !showCtl;
+            if (ImGui::IsItemHovered()) ImGui::SetTooltip(audio ? (showCtl ? "hide the scope controls" : "scope controls: trigger, time, rate, hold, gain, freeze") : "scope controls");
+        }
+        const bool ctlRow = !audio || showCtl;
+        if (gFontSmall) ImGui::PushFont(gFontSmall);
+        if (ctlRow) {
             // its own row under the label so nothing gets clipped
             const float sw = std::max(70.0f, std::min(110.0f, (w - 150) / 4 - 8));
             ImGui::SetCursorScreenPos(ImVec2(o.x, y + 18));
@@ -2500,26 +2508,27 @@ static void drawWaveBody(float w, bool audio = false) {
             if (litF) ImGui::PopStyleColor();
         }
         if (gFontSmall) ImGui::PopFont();
-        const float laneGap = 8, top = y + 46;
-        const float paramsH = audio ? 2 * 52 + 18 : 0;        // the engine grid under the lanes
+        const float laneGap = 10, top = y + (ctlRow ? 46 : 22);
+        const float paramsH = audio ? 2 * 46 + 14 : 0;        // the engine grid under the lanes
         // the lanes take whatever height the card has left
         float roomH = ImGui::GetWindowPos().y + ImGui::GetWindowSize().y - top - 16 - paramsH;
-        const float lane = std::max(44.0f, std::min(audio ? 124.0f : 110.0f, (roomH - 4 * laneGap) / NZONES));
-        const float volH = audio ? 22.0f : 0.0f;              // the volume strip under the wave
+        const float lane = std::max(44.0f, std::min(audio ? 150.0f : 110.0f, (roomH - 4 * laneGap) / NZONES));
+        const float volH = audio ? 16.0f : 0.0f;              // the volume strip under the wave
         for (int z = 0; z < NZONES; z++) {
-            float ly = top + z * (lane + laneGap), mid = ly + (lane - volH) / 2, amp = (lane - volH) * 0.42f;
+            float ly = top + z * (lane + laneGap), mid = ly + (lane - volH) / 2 + 1, amp = (lane - volH) * 0.42f;
             dl->AddRectFilled(ImVec2(o.x, ly), ImVec2(o.x + w, ly + lane), IM_COL32(8, 8, 9, 255), 10);
-            graticule(o.x + 68, ly + 4, o.x + w - 8, ly + lane - volH - 4);
+            graticule(o.x + 68, ly + 4, o.x + w - 8, ly + lane - volH - 2);
             if (audio) {
                 // volume: a thin slider the width of the wave, the live level as a hairline over it
-                ImGui::PushStyleVar(ImGuiStyleVar_FramePadding, ImVec2(0, 1));
+                ImGui::PushStyleVar(ImGuiStyleVar_FramePadding, ImVec2(0, 0));
                 ImGui::PushStyleVar(ImGuiStyleVar_GrabMinSize, 6.0f);
-                ImGui::SetCursorScreenPos(ImVec2(o.x + 68, ly + lane - volH + 3));
+                ImGui::PushStyleVar(ImGuiStyleVar_FrameRounding, 4.0f);
+                ImGui::SetCursorScreenPos(ImVec2(o.x + 68, ly + lane - volH + 2));
                 ImGui::SetNextItemWidth(w - 76);
                 char vid[16]; snprintf(vid, sizeof vid, "##vol%d", z);
                 float v = gZoneSlider[z];
                 if (ImGui::SliderFloat(vid, &v, 0.0f, 1.0f, "")) { gZoneSlider[z] = v; gEngine.params.zoneLevel[z].store(v); }
-                ImGui::PopStyleVar(2);
+                ImGui::PopStyleVar(3);
                 float lv = gEngine.meter[2 + z].load();
                 dl->AddLine(ImVec2(o.x + 68, ly + lane - 2), ImVec2(o.x + 68 + (w - 76) * lv, ly + lane - 2), W(0.5f), 1.0f);
                 if (gFontSmall) ImGui::PushFont(gFontSmall);
@@ -2542,8 +2551,8 @@ static void drawWaveBody(float w, bool audio = false) {
             const float colGap = 18;
             float px = o.x, pw = w;
             float colW = (pw - 4 * colGap) / 5.0f - 10;
-            float rowH = 52;
-            float paramsY = ImGui::GetWindowPos().y + ImGui::GetWindowSize().y - 16 - 2 * 52;
+            float rowH = 46;
+            float paramsY = ImGui::GetWindowPos().y + ImGui::GetWindowSize().y - 14 - 2 * 46;
             auto cx = [&](int c) { return px + c * (colW + 10 + colGap); };
             auto ry = [&](int r) { return paramsY + r * rowH; };
             miniParam("Intensity", gEngine.params.intensity, cx(0), ry(0), colW, gEngine.liveIntensity.load());
