@@ -1406,7 +1406,7 @@ static void drawTunerBody() {
         ImGui::SetCursorPosX(ImGui::GetCursorPosX() + std::max(0.0f, (w - total) / 2));
         for (int t = 0; t < kNumTunings; t++) {
             if (t) ImGui::SameLine();
-            if (ImGui::SmallButton(kTunings[t].name)) {
+            if (ImGui::Button(kTunings[t].name)) {
                 for (int z = 0; z < NZONES; z++) setZoneHz(z, kTunings[t].hz[z]);
                 gTunerDirtyT = now;
             }
@@ -1416,20 +1416,76 @@ static void drawTunerBody() {
         {
             bool lit = gLearnArmed;
             if (lit) ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(1, 1, 1, 0.22f));
-            if (ImGui::SmallButton(learnLbl)) { gLearnArmed = !gLearnArmed; gLearnSel = -1; }
+            if (ImGui::Button(learnLbl)) { gLearnArmed = !gLearnArmed; gLearnSel = -1; }
             if (lit) ImGui::PopStyleColor();
             if (ImGui::IsItemHovered())
                 ImGui::SetTooltip("arm, click an orb / HZ / LVL cell, then move a knob on your controller");
         }
         ImGui::SameLine();
-        if (ImGui::SmallButton(droneLbl))
+        if (ImGui::Button(droneLbl))
             for (int z = 0; z < NZONES; z++) setDrone(z, !anyDrone);
+    }
+    // ── row 2, centred: the engine — SYNTH · SPLIT · MONO · STEREO · SPATIAL,
+    //    and the one or two settings each mode has ──
+    {
+        static const char* modes[5] = {"SYNTH", "SPLIT", "MONO", "STEREO", "SPATIAL"};
+        static const char* tips[5] = {
+            "SYNTH: AVA's own tones from the music's analysis, every ring a mix of one root",
+            "SPLIT: each ring follows one layer of the song - sub, bass line, drums, voice, air",
+            "MONO: the song's own low end (18-160 Hz) to every ring, bass x2",
+            "STEREO: the low end by side - head + belly left, heart + root right; the centre takes one side",
+            "SPATIAL: side from the stereo image, height from the layer - voice up top, bass low, sub in the feet"};
+        int em = gEngine.params.engineMode.load();
+        const float padX = ImGui::GetStyle().FramePadding.x * 2, sp = ImGui::GetStyle().ItemSpacing.x;
+        float total = 0;
+        for (int m = 0; m < 5; m++) total += ImGui::CalcTextSize(modes[m]).x + padX + (m ? sp : 0);
+        ImGui::Dummy(ImVec2(0, 2));
+        ImGui::SetCursorPosX(ImGui::GetCursorPosX() + std::max(0.0f, (w - total) / 2));
+        for (int m = 0; m < 5; m++) {
+            if (m) ImGui::SameLine();
+            bool on = em == m;
+            if (on) ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(1, 1, 1, 0.28f));
+            if (ImGui::Button(modes[m])) gEngine.params.engineMode.store(m);
+            if (on) ImGui::PopStyleColor();
+            if (ImGui::IsItemHovered()) ImGui::SetTooltip("%s", tips[m]);
+        }
+        // the mode's own settings, centred under it
+        if (gFontSmall) ImGui::PushFont(gFontSmall);
+        if (em == 3) {
+            int sc = gEngine.params.stereoCenter.load();
+            float tw = ImGui::CalcTextSize("centre").x + sp + ImGui::CalcTextSize("LEFT").x + ImGui::CalcTextSize("RIGHT").x + 2 * padX + sp;
+            ImGui::SetCursorPosX(ImGui::GetCursorPosX() + std::max(0.0f, (w - tw) / 2));
+            ImGui::TextDisabled("centre"); ImGui::SameLine();
+            if (sc == 0) ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(1, 1, 1, 0.28f));
+            if (ImGui::Button("LEFT")) gEngine.params.stereoCenter.store(0);
+            if (sc == 0) ImGui::PopStyleColor();
+            ImGui::SameLine();
+            if (sc == 1) ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(1, 1, 1, 0.28f));
+            if (ImGui::Button("RIGHT")) gEngine.params.stereoCenter.store(1);
+            if (sc == 1) ImGui::PopStyleColor();
+            if (ImGui::IsItemHovered()) ImGui::SetTooltip("which side of the image the centre pad follows");
+        } else if (em == 1 || em == 4) {
+            float lift = gEngine.params.lift.load();
+            ImGui::SetCursorPosX(ImGui::GetCursorPosX() + std::max(0.0f, (w - 260) / 2));
+            ImGui::TextDisabled("lift"); ImGui::SameLine();
+            ImGui::SetNextItemWidth(220);
+            if (ImGui::SliderFloat("##lift", &lift, 0.0f, 1.0f, "%.2f")) gEngine.params.lift.store(lift);
+            if (ImGui::IsItemHovered()) ImGui::SetTooltip("quiet sustained instruments come up to be felt; loud passages are left alone");
+        } else if (em == 0) {
+            int ent = gEngine.params.entrainment.load();
+            ImGui::SetCursorPosX(ImGui::GetCursorPosX() + std::max(0.0f, (w - 140) / 2));
+            bool e = ent != 0;
+            if (ImGui::Checkbox("entrainment", &e)) gEngine.params.entrainment.store(e ? 1 : 0);
+        } else {
+            ImGui::Dummy(ImVec2(0, ImGui::GetFrameHeight()));
+        }
+        if (gFontSmall) ImGui::PopFont();
     }
 
     // ── the body, top and centre: the octagon, each ring numbered like its
     //    orb, lit as it moves, with a hairline dial of ticks around it ──
     ImVec2 top = ImGui::GetCursorScreenPos();
-    const float oR = 88.0f;
+    const float oR = 104.0f;
     ImVec2 oc(cxm, top.y + 14 + oR);
     const int ringZone[4] = {ROOT, BELLY, HEART, HEAD};
     const float bounds[5] = {0.36f, 0.50f, 0.65f, 0.80f, 0.96f};
@@ -1663,10 +1719,10 @@ static void drawTunerBody() {
     for (int i = 0; i < NZONES; i++) {
         int z = kTuneOrder[i];
         float cl = t0.x + colW * i, cx = cl + colW / 2;
-        if (i) dl->AddLine(ImVec2(cl, t0.y + 4), ImVec2(cl, t0.y + tableH - 8), W(0.07f), 1.0f);
         bool colHot = ImGui::IsMouseHoveringRect(ImVec2(cl, t0.y), ImVec2(cl + colW, t0.y + tableH));
         if (colHot && hotNow < 0) hotNow = z;                      // lights ring + strings next frame
-        if (hotZ == z) dl->AddRectFilled(ImVec2(cl + 4, t0.y - 2), ImVec2(cl + colW - 4, t0.y + tableH - 6), W(0.035f), 8);
+        // each readout is its own rounded card
+        dl->AddRectFilled(ImVec2(cl + 3, t0.y - 8), ImVec2(cl + colW - 3, t0.y + tableH - 2), W(hotZ == z ? 0.06f : 0.035f), 12);
         char buf[48];
         if (gFontSmall) ImGui::PushFont(gFontSmall);
         snprintf(buf, sizeof(buf), "%d  %s", i + 1, kZoneNames[z]);
@@ -1690,10 +1746,10 @@ static void drawTunerBody() {
         ImGui::PushID(z);
         const float padX = ImGui::GetStyle().FramePadding.x * 2;
         float bw = ImGui::CalcTextSize("DRONE").x + padX;
-        ImGui::SetCursorScreenPos(ImVec2(cx - bw / 2, t0.y + 58));
+        ImGui::SetCursorScreenPos(ImVec2(cx - bw / 2, t0.y + 56));
         bool litD = gTuneDrone[z];
         if (litD) ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(1, 1, 1, 0.28f));
-        if (ImGui::SmallButton("DRONE")) setDrone(z, !gTuneDrone[z]);
+        if (ImGui::Button("DRONE")) setDrone(z, !gTuneDrone[z]);
         if (litD) ImGui::PopStyleColor();
 
         // CC cells under it: in LEARN mode they arm, otherwise they show the binding
@@ -1944,8 +2000,7 @@ static void drawMiniFrame(GLFWwindow* win, ImDrawList* dl, ImGuiViewport* vp) {
         }
     }
     drawShaderOctagon(dl, c, R);
-    if (gMode == 2) drawOctagonLauncher(dl, c, R);
-    else drawOctagon(dl, c, R);
+    drawOctagon(dl, c, R);
     // bottom row: signal dot · volume · expand
     {
         float by = H_ - 22;
@@ -2976,7 +3031,7 @@ static void drawSoundsBody(float w) {
     double tnow = glfwGetTime();
     int cur = gEngine.params.padPatch.load();
     ImDrawList* pdl = ImGui::GetWindowDrawList();
-    const float gapX = 8, gapY = 8, tileH = 60;
+    const float gapX = 8, gapY = 8, tileH = 88;
     const int cols = 3;
     const float tileW = std::floor((w - (cols - 1) * gapX) / (float)cols);
     int col = 0;
@@ -3004,10 +3059,13 @@ static void drawSoundsBody(float w) {
             pdl->AddRectFilled(ImVec2(p0.x + 8, p1.y - 4), ImVec2(p0.x + 8 + (tileW - 16) * progress, p1.y - 2),
                                hot ? IM_COL32(255, 150, 70, 220) : IM_COL32(255, 255, 255, 160), 1);
         pdl->PushClipRect(p0, p1, true);
-        drawIcon(pdl, icon, ImVec2(p0.x + 24, p0.y + tileH / 2), 22.0f, W(sel ? 0.95f : (h ? 0.85f : 0.6f)));
-        pdl->AddText(ImVec2(p0.x + 46, p0.y + 12), W(sel ? 0.97f : 0.88f), name);
+        float cx = p0.x + tileW / 2;
+        drawIcon(pdl, icon, ImVec2(cx, p0.y + 24), 17.0f, W(sel ? 0.95f : (h ? 0.85f : 0.6f)));
+        ImVec2 ns = ImGui::CalcTextSize(name);
+        pdl->AddText(ImVec2(cx - ns.x / 2, p0.y + 44), W(sel ? 0.97f : 0.88f), name);
         if (gFontSmall) ImGui::PushFont(gFontSmall);
-        pdl->AddText(ImVec2(p0.x + 46, p0.y + 34), W(0.42f), hint);
+        ImVec2 hs = ImGui::CalcTextSize(hint);
+        pdl->AddText(ImVec2(cx - std::min(hs.x, tileW - 12) / 2, p0.y + 64), W(0.42f), hint);
         if (gFontSmall) ImGui::PopFont();
         pdl->PopClipRect();
         col = (col + 1) % cols;
@@ -3474,12 +3532,33 @@ int main(int argc, char** argv) {
                     ImGui::SetCursorScreenPos(ImVec2(hp.x, hp.y + 34));
                 }
                 bool devOk = gSelDevice >= 0 && gSelDevice < (int)gDevices.size();
+                // sections are rounded cards: the card's background is drawn
+                // behind the section once its height is known (channel 0)
+                ImGui::PushStyleVar(ImGuiStyleVar_FramePadding, ImVec2(10, 5));
+                ImGui::PushStyleVar(ImGuiStyleVar_ItemSpacing, ImVec2(8, 7));
+                hdl->ChannelsSplit(2);
+                hdl->ChannelsSetCurrent(1);
+                static ImVec2 cardP0;
+                static bool cardOpen = false;
+                const float cardPad = 8, cardRight = ImGui::GetWindowPos().x + ImGui::GetWindowSize().x - 10;
+                auto endCard = [&]() {
+                    if (!cardOpen) return;
+                    ImVec2 e = ImGui::GetCursorScreenPos();
+                    hdl->ChannelsSetCurrent(0);
+                    hdl->AddRectFilled(ImVec2(cardP0.x - cardPad, cardP0.y - 10), ImVec2(cardRight, e.y + 4),
+                                       IM_COL32(255, 255, 255, 9), 14);
+                    hdl->ChannelsSetCurrent(1);
+                    cardOpen = false;
+                };
                 auto head = [&](const char* t, bool first = false) {
-                    if (!first) ImGui::Dummy(ImVec2(0, 10));
+                    endCard();
+                    ImGui::Dummy(ImVec2(0, first ? 2 : 16));
+                    cardP0 = ImGui::GetCursorScreenPos();
+                    cardOpen = true;
                     if (gFontSmall) ImGui::PushFont(gFontSmall);
                     ImGui::TextDisabled("%s", t);
                     if (gFontSmall) ImGui::PopFont();
-                    ImGui::Separator();
+                    ImGui::Dummy(ImVec2(0, 4));
                 };
                 // ── OUTPUT: one line — the device, a status dot, its hardware knob ──
                 head("OUTPUT", true);
@@ -3542,7 +3621,6 @@ int main(int argc, char** argv) {
 
                 // ── CHANNELS: what leaves the interface on each output ──
                 head("CHANNELS");
-                ImGui::Separator();
                 int nch = gOut.running()
                               ? gOut.activeChannels
                               : (devOk ? std::min(gDevices[gSelDevice].channels,
@@ -3627,19 +3705,6 @@ int main(int argc, char** argv) {
                 // ── RINGS: solo one to find it by feel ──
                 head("RINGS");
                 {
-                    // STEREO: the centre (feet) has no side of its own; pick one
-                    int sc = gEngine.params.stereoCenter.load();
-                    ImGui::TextDisabled("STEREO centre");
-                    ImGui::SameLine(150);
-                    if (sc == 0) ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(1, 1, 1, 0.28f));
-                    if (ImGui::SmallButton("LEFT")) gEngine.params.stereoCenter.store(0);
-                    if (sc == 0) ImGui::PopStyleColor();
-                    ImGui::SameLine();
-                    if (sc == 1) ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(1, 1, 1, 0.28f));
-                    if (ImGui::SmallButton("RIGHT")) gEngine.params.stereoCenter.store(1);
-                    if (sc == 1) ImGui::PopStyleColor();
-                    if (ImGui::IsItemHovered()) ImGui::SetTooltip("which side of the image the centre pad follows in STEREO mode");
-                }
                 {
                     int solo = gEngine.params.soloZone.load();
                     for (int i = 0; i < NZONES; i++) {
@@ -3721,6 +3786,16 @@ int main(int argc, char** argv) {
                     if (worst > 0.02f) ImGui::TextColored(ImVec4(1, 0.45f, 0.35f, 1), "holding %.0f dB", 20.0f * log10f(std::max(0.01f, 1.0f - worst)));
                     else ImGui::TextDisabled("clear");
                 }
+                // ── MIDI: the controller in, the octagon out (folded away) ──
+                head("MIDI");
+                {
+                    static bool midiOpen = false;
+                    if (ImGui::Button(midiOpen ? "Controller & octagon out  v" : "Controller & octagon out  >")) midiOpen = !midiOpen;
+                    if (midiOpen) { ImGui::Dummy(ImVec2(0, 4)); drawMidiBody(); }
+                }
+                endCard();
+                hdl->ChannelsMerge();
+                ImGui::PopStyleVar(2);
             }
             ImGui::End();
         }
@@ -3728,38 +3803,12 @@ int main(int argc, char** argv) {
         // ── octagon (left) ──
         float rightW = std::min(700.0f, W_ * 0.46f);
         float leftW = W_ - rightW;
-        ImVec2 octC(leftW * 0.5f, H_ * 0.49f);
-        float octR = std::min(leftW, H_) * 0.39f;
-        // engine mode, centred above the octagon: SYNTH · SPLIT · MONO · STEREO · SURROUND
-        {
-            static const char* modes[5] = {"SYNTH", "SPLIT", "MONO", "STEREO", "SPATIAL"};
-            static const char* modeTips[5] = {
-                "SYNTH: one root note, five mixes of it. The original engine.",
-                "SPLIT: feet = sub, root = bass line, belly = drums,\nheart = vocal/chord melody, head = lead/air melody. Five layers at once.",
-                "MONO: the song itself, felt. Its low end to every zone,\nbass exaggerated x2, plus an octave-down copy of bass the rings can't move.",
-                "STEREO: MONO split left / right across the bed. Head + belly feel the left\nlow end, heart + root the right (width x2); the centre takes one side\n(Settings > RINGS).",
-                "SPATIAL: the mix placed on the body. Left of the image on head + belly, right on\nheart + root, the voice up top, bass line + drums low, the sub in the feet.\nA head-to-toe roll fires only on a clear bass drop."};
-            int em = gEngine.params.engineMode.load();
-            const float gap = 22;
-            float total = 0;
-            for (int m = 0; m < 5; m++) total += ImGui::CalcTextSize(modes[m]).x + (m ? gap : 0);
-            float x = octC.x - total / 2, cy = octC.y - octR - 24;
-            for (int m = 0; m < 5; m++) {
-                ImVec2 ts = ImGui::CalcTextSize(modes[m]);
-                ImGui::SetCursorScreenPos(ImVec2(x - 6, cy - 13));
-                char id[16]; snprintf(id, sizeof(id), "##em%d", m);
-                if (ImGui::InvisibleButton(id, ImVec2(ts.x + 12, 26))) gEngine.params.engineMode.store(m);
-                bool on = em == m, hov = ImGui::IsItemHovered();
-                if (hov) ImGui::SetTooltip("%s", modeTips[m]);
-                dl->AddText(ImVec2(x, cy - ts.y / 2), W(on ? 0.95f : (hov ? 0.7f : 0.35f)), modes[m]);
-                if (on) dl->AddLine(ImVec2(x, cy + ts.y / 2 + 4), ImVec2(x + ts.x, cy + ts.y / 2 + 4), W(0.9f), 1.5f);
-                x += ts.x + gap;
-            }
-        }
+        ImVec2 octC(leftW * 0.5f, H_ * 0.47f);
+        float octR = std::min(leftW, H_) * 0.42f;
+        // (engine modes live in Artifact > Tune)
 
         drawShaderOctagon(dl, octC, octR);   // the shader shows through the glass, masked to the body
-        if (gMode == 2) drawOctagonLauncher(dl, octC, octR);
-        else drawOctagon(dl, octC, octR);
+        drawOctagon(dl, octC, octR);
 
 
 
@@ -4061,12 +4110,13 @@ int main(int argc, char** argv) {
             if (gMode == 1) {
                 drawVisualBody(win, bw);
             } else {
-                // ARTIFACT sub-tabs: Sounds · Tuner · MIDI · Play
-                static const char* subs[4] = {"Sounds", "Tune", "MIDI", "Play"};
-                subNav(subs, 4, &gArtifactTab, bw);
+                // ARTIFACT sub-tabs: Sounds · Tune (MIDI lives in Settings; the
+                // stem Play page is parked — reachable only by dropping a folder)
+                static const char* subs[2] = {"Sounds", "Tune"};
+                if (gArtifactTab == 2) gArtifactTab = 0;
+                subNav(subs, 2, &gArtifactTab, bw);
                 if (gArtifactTab == 0) drawSoundsBody(bw);
                 else if (gArtifactTab == 1) drawTunerBody();
-                else if (gArtifactTab == 2) drawMidiBody();
                 else drawPlayBody(bw);
             }
             ImGui::EndChild();
