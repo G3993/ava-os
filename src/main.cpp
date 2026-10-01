@@ -69,11 +69,14 @@ static int gActiveTab = 0;
 static int gMode = 0;        // right card: 0 Audio · 1 Visual · 2 Artifact
 static int gArtifactTab = 0; // Artifact: 0 Sounds · 1 Tuner · 2 MIDI · 3 Play
 static float gZoneSlider[NZONES] = {0.65f, 0.6f, 0.8f, 0.75f, 0.75f};
-static float gEdgeFade = 0.0f; // black vignette on the shader/projector output
+static float gEdgeFade = 0.0f; // vignette on the shader/projector output
 static float gMasterVol = 1.0f;
 static bool gPlaying = false;
 static ShaderHost gShaders;
-static GLFWwindow* gExtWin = nullptr;
+static std::vector<GLFWwindow*> gExtWins;   // projector outputs, one window per screen
+static float gShaderReact = 1.0f;           // universal audio activity for every shader (0 = still, 2 = wild)
+static int   gOctStyle = 0;                 // the body on the left: 0 filled glass · 1 outlines · 2 hidden
+static bool  gHidePreviews = false;         // Display: no shader preview card
 static double gShaderT0 = 0;
 // single "Balance" control drives grounding/uplift (all presets are complementary)
 static std::atomic<float> gBalance{0.5f};
@@ -709,6 +712,8 @@ static void rippleDot(ImDrawList* dl, ImVec2 c, float r0, float sig, float lvl, 
 }
 
 static void drawOctagon(ImDrawList* dl, ImVec2 c, float R) {
+    if (gOctStyle == 2) return;                // hidden (Display > Octagon)
+    const bool outline = gOctStyle == 1;       // outlines only, minimal fill
     // zone per ring: center pad = FEET, then ROOT→HEAD outward (grounded
     // layout — same order as the MIDI zone pads)
     const int ringZone[4] = {ROOT, BELLY, HEART, HEAD};
@@ -845,9 +850,13 @@ static void drawOctagon(ImDrawList* dl, ImVec2 c, float R) {
             if (hoverZone == ringZone[ring]) a = std::min(252, a + (hoverK == k ? 44 : 12));
             bool held = gPadZone == ringZone[ring] && gPadK == k;
             if (held) a = 252;
-            roundedPolyFill(dl, q, 4, roundR, IM_COL32(255, 255, 255, a),
-                            held ? IM_COL32(255, 255, 255, 230) : IM_COL32(0, 0, 0, 30),
-                            held ? 2.5f : 1.0f);
+            if (outline)
+                roundedPolyFill(dl, q, 4, roundR, IM_COL32(255, 255, 255, a / 10),
+                                held ? IM_COL32(255, 255, 255, 230) : IM_COL32(255, 255, 255, 40 + a / 4), held ? 2.5f : 1.0f);
+            else
+                roundedPolyFill(dl, q, 4, roundR, IM_COL32(255, 255, 255, a),
+                                held ? IM_COL32(255, 255, 255, 230) : IM_COL32(0, 0, 0, 30),
+                                held ? 2.5f : 1.0f);
 
             // bead embedded in the slice: dark when idle, lit + rippling when the zone fires
             rippleDot(dl, ctr, 3.6f, sigAt(ringZone[ring], k), lvl, k * 0.37f + ring * 0.9f);
@@ -867,10 +876,14 @@ static void drawOctagon(ImDrawList* dl, ImVec2 c, float R) {
         if (hoverZone == FEET) a = std::min(252, a + 32);
         bool held = gPadZone == FEET;
         if (held) a = 252;
-        roundedPolyFill(dl, pts, 8, roundR * 1.4f,
-                        IM_COL32(255, 255, 255, std::min(a, 252)),
-                        held ? IM_COL32(255, 255, 255, 230) : IM_COL32(0, 0, 0, 26),
-                        held ? 2.5f : 1.0f);
+        if (outline)
+            roundedPolyFill(dl, pts, 8, roundR * 1.4f, IM_COL32(255, 255, 255, a / 10),
+                            held ? IM_COL32(255, 255, 255, 230) : IM_COL32(255, 255, 255, 90), held ? 2.5f : 1.0f);
+        else
+            roundedPolyFill(dl, pts, 8, roundR * 1.4f,
+                            IM_COL32(255, 255, 255, std::min(a, 252)),
+                            held ? IM_COL32(255, 255, 255, 230) : IM_COL32(0, 0, 0, 26),
+                            held ? 2.5f : 1.0f);
         rippleDot(dl, c, 8.0f, sigAt(FEET, 0), lvl, 0.0f);
     }
 }
@@ -1910,7 +1923,7 @@ static void drawShaderPreview(ImDrawList* dl, ImVec2 p0, float w) {
     dl->AddRect(p0, p1, W(0.08f), 10);
 }
 
-static int gVisualTab = 0;   // Visual: 0 Wave · 1 Shaders · 2 Display
+static int gVisualTab = 0;   // Visual: 0 Shaders · 1 Display
 static bool gMini = false;   // floating always-on-top octagon
 static int gMiniRestore[4] = {0, 0, 0, 0};
 // The mini window is the same window, undecorated, floating over everything
@@ -2025,6 +2038,28 @@ static void saveDeletedShaders() {
 }
 
 // the shader preview, centred in the column
+// the same card as MASTER (172 tall, title inside), the shader filling its
+// band edge to edge — cropped top and bottom, like a banner
+static float drawShaderCard(ImDrawList* dl, ImVec2 o, float w, float y) {
+    const float hh = 172, cy0 = y + 36, cy1 = y + hh - 8;
+    dl->AddRectFilled(ImVec2(o.x, y), ImVec2(o.x + w, y + hh), IM_COL32(8, 8, 9, 255), 14);
+    dl->AddRect(ImVec2(o.x, y), ImVec2(o.x + w, y + hh), W(0.06f), 14);
+    dl->AddText(ImVec2(o.x + 16, y + 12), W(0.9f), "SHADER");
+    if (gFontSmall) ImGui::PushFont(gFontSmall);
+    dl->AddText(ImVec2(o.x + 84, y + 14), W(0.32f), gShaders.active() ? gShaders.currentTitle() : "none");
+    if (gFontSmall) ImGui::PopFont();
+    ImVec2 b0(o.x + 12, cy0), b1(o.x + w - 12, cy1);
+    dl->AddRectFilled(b0, b1, IM_COL32(0, 0, 0, 255), 8);
+    if (gShaders.active() && gShaders.outputTexture()) {
+        float bandA = (b1.x - b0.x) / (b1.y - b0.y), shA = 16.0f / 9.0f;
+        float vis = std::min(1.0f, shA / bandA);         // the slice of the picture's height that fits
+        dl->AddImageRounded((ImTextureID)(intptr_t)gShaders.outputTexture(), b0, b1,
+                            ImVec2(0, 0.5f + vis / 2), ImVec2(1, 0.5f - vis / 2), IM_COL32_WHITE, 8);
+    }
+    dl->AddRect(b0, b1, W(0.08f), 8);
+    return hh;
+}
+
 static float drawShaderPreviewCentered(ImDrawList* dl, ImVec2 o, float w, float y, float maxW = 320.0f) {
     float pw = std::min(w, maxW);
     drawShaderPreview(dl, ImVec2(o.x + (w - pw) / 2, y), pw);
@@ -2039,7 +2074,7 @@ static float gScopeRate = 12.0f;  // refreshes per second; low = calm, 60 = live
 static float gScopeHold = 0.35f;  // frame blending 0..0.95: how much of the last picture stays
 static bool  gScopeFreeze = false;
 static bool gVecBig = false;      // vectorscope: small beside the wave, or large
-static int  gVecMode = 5;         // 0 = input L/R · 1 = HEAD×FEET · 2 = HEART×BELLY · 3 = ROOT×FEET (ring Lissajous) · 4 = FLOATERS (the mark's animation) · 5 = FIGURE (one character warping through shapes)
+static int  gVecMode = 4;         // 0 = input L/R · 1 = HEAD×FEET · 2 = HEART×BELLY · 3 = ROOT×FEET (ring Lissajous) · 4 = FLOATERS (the mark's animation) · 5 = FIGURE (one character warping through shapes)
 static bool gShowSpectrum = false; // MASTER right side: the input wave (default) or the spectrum; click the label
 static int  gAnimLoops = 0, gAnimLoopLen[8];   // the floaters frame on screen: its closed loops
 static float gFigGate = 0.0f;                  // FIGURE: 1 = alive on the input, 0 = collapsed into the sphere
@@ -2047,7 +2082,7 @@ static const float kSphereR = 0.14f;            // the sphere's radius in scope 
 static float gFigSwell = 0.8f;                 // the figure's current scale
 // phosphor: the scope traces glow green on a graticule, like the instrument
 static inline ImU32 PH(float a) { return IM_COL32(255, 255, 255, (int)(255 * std::min(1.0f, std::max(0.0f, a)))); }
-static void drawWaveBody(float w) {
+static void drawWaveBody(float w, bool audio = false) {
     ImDrawList* dl = ImGui::GetWindowDrawList();
     ImVec2 o = ImGui::GetCursorScreenPos();
     float y = o.y;
@@ -2466,13 +2501,32 @@ static void drawWaveBody(float w) {
         }
         if (gFontSmall) ImGui::PopFont();
         const float laneGap = 8, top = y + 46;
+        const float paramsH = audio ? 2 * 52 + 18 : 0;        // the engine grid under the lanes
         // the lanes take whatever height the card has left
-        float roomH = ImGui::GetWindowPos().y + ImGui::GetWindowSize().y - top - 16;
-        const float lane = std::max(44.0f, std::min(110.0f, (roomH - 4 * laneGap) / NZONES));
+        float roomH = ImGui::GetWindowPos().y + ImGui::GetWindowSize().y - top - 16 - paramsH;
+        const float lane = std::max(44.0f, std::min(audio ? 124.0f : 110.0f, (roomH - 4 * laneGap) / NZONES));
+        const float volH = audio ? 22.0f : 0.0f;              // the volume strip under the wave
         for (int z = 0; z < NZONES; z++) {
-            float ly = top + z * (lane + laneGap), mid = ly + lane / 2, amp = lane * 0.42f;
+            float ly = top + z * (lane + laneGap), mid = ly + (lane - volH) / 2, amp = (lane - volH) * 0.42f;
             dl->AddRectFilled(ImVec2(o.x, ly), ImVec2(o.x + w, ly + lane), IM_COL32(8, 8, 9, 255), 10);
-            graticule(o.x + 68, ly + 4, o.x + w - 8, ly + lane - 4);
+            graticule(o.x + 68, ly + 4, o.x + w - 8, ly + lane - volH - 4);
+            if (audio) {
+                // volume: a thin slider the width of the wave, the live level as a hairline over it
+                ImGui::PushStyleVar(ImGuiStyleVar_FramePadding, ImVec2(0, 1));
+                ImGui::PushStyleVar(ImGuiStyleVar_GrabMinSize, 6.0f);
+                ImGui::SetCursorScreenPos(ImVec2(o.x + 68, ly + lane - volH + 3));
+                ImGui::SetNextItemWidth(w - 76);
+                char vid[16]; snprintf(vid, sizeof vid, "##vol%d", z);
+                float v = gZoneSlider[z];
+                if (ImGui::SliderFloat(vid, &v, 0.0f, 1.0f, "")) { gZoneSlider[z] = v; gEngine.params.zoneLevel[z].store(v); }
+                ImGui::PopStyleVar(2);
+                float lv = gEngine.meter[2 + z].load();
+                dl->AddLine(ImVec2(o.x + 68, ly + lane - 2), ImVec2(o.x + 68 + (w - 76) * lv, ly + lane - 2), W(0.5f), 1.0f);
+                if (gFontSmall) ImGui::PushFont(gFontSmall);
+                char vt[8]; snprintf(vt, sizeof vt, "%.0f", v * 100);
+                dl->AddText(ImVec2(o.x + 12, ly + lane - volH + 1), W(0.5f), vt);
+                if (gFontSmall) ImGui::PopFont();
+            }
             // auto-scale each ring to its own recent peak so every lane draws a full wave
             float gain = gScopeGain * 0.9f / std::max(peakOf(gEngine.vibScope[z]), 0.02f);
             trace(1 + z, gEngine.vibScope[z], o.x + 72, o.x + w - 12, mid, amp, gain);
@@ -2483,6 +2537,30 @@ static void drawWaveBody(float w) {
             if (gFontSmall) ImGui::PopFont();
         }
         y = top + NZONES * (lane + laneGap) + 8;
+        if (audio) {
+            // engine parameters: a 5 × 2 grid, label · value bar · live line
+            const float colGap = 18;
+            float px = o.x, pw = w;
+            float colW = (pw - 4 * colGap) / 5.0f - 10;
+            float rowH = 52;
+            float paramsY = ImGui::GetWindowPos().y + ImGui::GetWindowSize().y - 16 - 2 * 52;
+            auto cx = [&](int c) { return px + c * (colW + 10 + colGap); };
+            auto ry = [&](int r) { return paramsY + r * rowH; };
+            miniParam("Intensity", gEngine.params.intensity, cx(0), ry(0), colW, gEngine.liveIntensity.load());
+            miniParam("Balance", gBalance, cx(1), ry(0), colW, gEngine.liveBalance.load());
+            miniParam("Pulse", gEngine.params.pulseSync, cx(2), ry(0), colW, gEngine.livePulse.load());
+            miniParam("Flow", gEngine.params.bodyFlow, cx(3), ry(0), colW, gEngine.liveFlow.load());
+            miniParam("Warmth", gEngine.params.waveWarmth, cx(4), ry(0), colW, gEngine.liveWarmth.load());
+            miniParam("Depth", gEngine.params.subDepth, cx(0), ry(1), colW, gEngine.liveDepth.load());
+            miniParam("Breath", gEngine.params.breath, cx(1), ry(1), colW, 1.0f - gEngine.breathNow.load());
+            miniParam("Dynamics", gEngine.params.dynamics, cx(2), ry(1), colW, gEngine.liveDyn.load());
+            miniParam("Void", gEngine.params.voidAmt, cx(3), ry(1), colW, gEngine.voidNow.load());
+            miniParam("Lift", gEngine.params.lift, cx(4), ry(1), colW, gEngine.liveLift.load());
+            float bal = gBalance.load();
+            gEngine.params.uplift.store(bal);
+            gEngine.params.grounding.store(1.0f - bal);
+            y = paramsY + 2 * rowH;
+        }
     }
     ImGui::SetCursorScreenPos(ImVec2(o.x, y));
     ImGui::Dummy(ImVec2(w, 1));
@@ -2595,13 +2673,18 @@ static int cookThumbnails() {
 static void drawShadersBody(float w) {
     ImDrawList* dl = ImGui::GetWindowDrawList();
     ImVec2 o = ImGui::GetCursorScreenPos();
-    if (gShaders.active()) {
+    {
+        float ph = drawShaderCard(dl, o, w, o.y + 6);
+        ImGui::SetCursorScreenPos(ImVec2(o.x, o.y + 6 + ph + 14));
+        // universal audio activity: scales what every shader hears
         if (gFontSmall) ImGui::PushFont(gFontSmall);
-        ImVec2 ts = ImGui::CalcTextSize(gShaders.currentTitle());
-        dl->AddText(ImVec2(o.x + (w - ts.x) / 2, o.y), W(0.35f), gShaders.currentTitle());
+        ImGui::TextDisabled("AUDIO ACTIVITY");
+        ImGui::SameLine(0, 12);
+        ImGui::SetNextItemWidth(-1);
+        ImGui::SliderFloat("##react", &gShaderReact, 0.0f, 2.0f, "%.2f");
+        if (ImGui::IsItemHovered()) ImGui::SetTooltip("how much of the music every shader feels: 0 = still, 1 = as written, 2 = wild");
         if (gFontSmall) ImGui::PopFont();
-        float ph = drawShaderPreviewCentered(dl, o, w, o.y + 18, 240.0f);
-        ImGui::SetCursorScreenPos(ImVec2(o.x, o.y + 18 + ph + 12));
+        ImGui::Dummy(ImVec2(0, 4));
     }
     int cooking = cookThumbnails();
     // the gallery folds away once a shader is chosen so its parameters get
@@ -2612,11 +2695,20 @@ static void drawShadersBody(float w) {
     wasActive = gShaders.active();
     static char filter[64] = "";
     {
-        if (gFontSmall) ImGui::PushFont(gFontSmall);
-        const char* lbl = galleryOpen ? "GALLERY  v" : "GALLERY  >";
-        if (ImGui::SmallButton(lbl)) galleryOpen = !galleryOpen;
-        if (ImGui::IsItemHovered()) ImGui::SetTooltip(galleryOpen ? "fold the gallery away" : "open the gallery");
-        if (gFontSmall) ImGui::PopFont();
+        // a chevron: down = open, right = folded
+        ImVec2 cp = ImGui::GetCursorScreenPos();
+        if (ImGui::InvisibleButton("##galtoggle", ImVec2(22, 22))) galleryOpen = !galleryOpen;
+        bool gh = ImGui::IsItemHovered();
+        if (gh) ImGui::SetTooltip(galleryOpen ? "fold the gallery away" : "open the gallery");
+        ImU32 cc = W(gh ? 0.95f : 0.5f);
+        ImVec2 cm(cp.x + 11, cp.y + 11);
+        if (galleryOpen) {
+            dl->AddLine(ImVec2(cm.x - 5, cm.y - 2.5f), ImVec2(cm.x, cm.y + 2.5f), cc, 1.6f);
+            dl->AddLine(ImVec2(cm.x, cm.y + 2.5f), ImVec2(cm.x + 5, cm.y - 2.5f), cc, 1.6f);
+        } else {
+            dl->AddLine(ImVec2(cm.x - 2.5f, cm.y - 5), ImVec2(cm.x + 2.5f, cm.y), cc, 1.6f);
+            dl->AddLine(ImVec2(cm.x + 2.5f, cm.y), ImVec2(cm.x - 2.5f, cm.y + 5), cc, 1.6f);
+        }
         if (galleryOpen) {
             ImGui::SameLine(0, 10);
             ImGui::SetNextItemWidth(-1);
@@ -2719,13 +2811,30 @@ static void drawShadersBody(float w) {
         auto rowLabel = [](const std::string& l) {
             ImGui::TextColored(ImVec4(1, 1, 1, 0.72f), "%s", l.c_str());
         };
-        for (auto& p : gShaders.params()) {
-            if (p.group != lastGroup) {
-                lastGroup = p.group;
-                if (!p.group.empty()) {
+        // anything about speed or movement comes first, under MOTION, so a
+        // shader that starts out wild can be calmed before anything else
+        auto isMotion = [](const ShaderParam& p) {
+            std::string t = p.name + " " + p.label;
+            for (auto& ch : t) ch = (char)tolower(ch);
+            static const char* keys[] = {"speed", "rate", "veloc", "motion", "move", "tempo", "freq", "spin", "rotat",
+                                         "flow", "drift", "pace", "time", "anim", "pulse", "swirl", "scroll", "wobble", "shake", "turb"};
+            for (const char* k : keys) if (t.find(k) != std::string::npos) return true;
+            return false;
+        };
+        std::vector<ShaderParam*> order;
+        for (auto& p : gShaders.params()) if (isMotion(p)) order.push_back(&p);
+        for (auto& p : gShaders.params()) if (!isMotion(p)) order.push_back(&p);
+        size_t nMotion = 0;
+        for (auto* q : order) { if (isMotion(*q)) nMotion++; else break; }
+        for (size_t oi = 0; oi < order.size(); oi++) {
+            auto& p = *order[oi];
+            std::string grp = oi < nMotion ? std::string("MOTION") : p.group;
+            if (grp != lastGroup) {
+                lastGroup = grp;
+                if (!grp.empty()) {
                     ImGui::Dummy(ImVec2(0, 6));
                     if (gFontSmall) ImGui::PushFont(gFontSmall);
-                    ImGui::TextDisabled("%s", p.group.c_str());
+                    ImGui::TextDisabled("%s", grp.c_str());
                     if (gFontSmall) ImGui::PopFont();
                 }
             }
@@ -2793,65 +2902,97 @@ static void drawShadersBody(float w) {
 }
 
 // ── DISPLAY: the picture, centred, and two buttons ──
+static void closeProjectors(GLFWwindow* win) {
+    for (auto* e : gExtWins) glfwDestroyWindow(e);
+    gExtWins.clear();
+    glfwMakeContextCurrent(win);
+}
 static void drawDisplayBody(GLFWwindow* win, float w) {
     ImDrawList* dl = ImGui::GetWindowDrawList();
     ImVec2 o = ImGui::GetCursorScreenPos();
-    float ph = drawShaderPreviewCentered(dl, o, w, o.y);
-    float y = o.y + ph + 14;
-    const float pw = std::min(w, 320.0f), px = o.x + (w - pw) / 2;
-    ImGui::SetCursorScreenPos(ImVec2(px, y));
-    ImGui::SetNextItemWidth(pw);
-    ImGui::SliderFloat("##edgefade", &gEdgeFade, 0.0f, 1.0f, "Edge fade  %.2f");
-    y += 44;
-    // two buttons, side by side, the same width as the picture
-    const float bw = (pw - 10) / 2, bh = 32;
-    ImGui::SetCursorScreenPos(ImVec2(px, y));
-    if (ImGui::Button(gMini ? "Back to viewport" : "Mini window", ImVec2(bw, bh))) setMini(win, !gMini);
+    float y = o.y + 6;
+    if (!gHidePreviews) y += drawShaderCard(dl, o, w, y) + 14;
+    ImGui::SetCursorScreenPos(ImVec2(o.x, y));
+    const float lw = 130;
+    auto row = [&](const char* t) {
+        if (gFontSmall) ImGui::PushFont(gFontSmall);
+        ImGui::TextDisabled("%s", t);
+        if (gFontSmall) ImGui::PopFont();
+        ImGui::SameLine(lw);
+    };
+    row("VIGNETTE");
+    ImGui::SetNextItemWidth(w - lw);
+    ImGui::SliderFloat("##edgefade", &gEdgeFade, 0.0f, 1.0f, "%.2f");
+    if (ImGui::IsItemHovered()) ImGui::SetTooltip("a dark edge around the picture on every projector");
+    row("OCTAGON");
+    {
+        static const char* styles[3] = {"Filled", "Outline", "Hidden"};
+        for (int k = 0; k < 3; k++) {
+            if (k) ImGui::SameLine();
+            bool on = gOctStyle == k;
+            if (on) ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(1, 1, 1, 0.28f));
+            if (ImGui::Button(styles[k])) gOctStyle = k;
+            if (on) ImGui::PopStyleColor();
+        }
+        ImGui::SameLine(0, 18);
+        ImGui::Checkbox("Hide previews", &gHidePreviews);
+    }
+    row("WINDOW");
+    if (ImGui::Button(gMini ? "Back to viewport" : "Mini window")) setMini(win, !gMini);
     if (ImGui::IsItemHovered())
         ImGui::SetTooltip(gMini ? "the full window again" : "a small octagon that floats over Spotify, Ableton, anything");
-    ImGui::SameLine(0, 10);
-    if (ImGui::Button(gExtWin ? "Projector: on" : "Projector", ImVec2(bw, bh))) ImGui::OpenPopup("##projector");
-    if (ImGui::IsItemHovered()) ImGui::SetTooltip("send the picture to a second screen or projector");
-    if (ImGui::BeginPopup("##projector")) {
-        if (gExtWin && ImGui::Selectable("Close the projector output")) {
-            glfwDestroyWindow(gExtWin);
-            gExtWin = nullptr;
-            glfwMakeContextCurrent(win);
-        }
+    // ── projectors: one output window per screen, as many as you have ──
+    row("PROJECTORS");
+    {
         int mcount = 0;
         GLFWmonitor** mons = glfwGetMonitors(&mcount);
         GLFWmonitor* mainMon = glfwGetPrimaryMonitor();
+        ImGui::BeginGroup();
         for (int m = 0; m < mcount; m++) {
             const GLFWvidmode* mode = glfwGetVideoMode(mons[m]);
+            // is there already an output on this screen?
+            int have = -1;
+            for (int i = 0; i < (int)gExtWins.size(); i++) if (glfwGetWindowMonitor(gExtWins[i]) == mons[m]) have = i;
             char row[160];
-            snprintf(row, sizeof(row), "%s  ·  %dx%d%s", glfwGetMonitorName(mons[m]),
-                     mode->width, mode->height, mons[m] == mainMon ? "  (this screen)" : "");
-            if (ImGui::Selectable(row)) {
-                if (gExtWin) { glfwDestroyWindow(gExtWin); gExtWin = nullptr; }
-                glfwWindowHint(GLFW_CONTEXT_VERSION_MAJOR, 3);
-                glfwWindowHint(GLFW_CONTEXT_VERSION_MINOR, 2);
-                glfwWindowHint(GLFW_OPENGL_PROFILE, GLFW_OPENGL_CORE_PROFILE);
-                glfwWindowHint(GLFW_OPENGL_FORWARD_COMPAT, GL_TRUE);
-                glfwWindowHint(GLFW_AUTO_ICONIFY, GLFW_FALSE);
-                gExtWin = glfwCreateWindow(mode->width, mode->height, "AVA Output", mons[m], win);
-                if (gExtWin) {
-                    glfwMakeContextCurrent(gExtWin);
-                    glfwSwapInterval(0);
-                    glfwMakeContextCurrent(win);
+            snprintf(row, sizeof(row), "%s  ·  %dx%d%s", glfwGetMonitorName(mons[m]), mode->width, mode->height,
+                     mons[m] == mainMon ? "  (this screen)" : "");
+            ImGui::PushID(m);
+            bool on = have >= 0;
+            if (on) ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(1, 1, 1, 0.28f));
+            if (ImGui::Button(on ? "ON" : "OFF", ImVec2(52, 0))) {
+                if (on) { glfwDestroyWindow(gExtWins[have]); gExtWins.erase(gExtWins.begin() + have); glfwMakeContextCurrent(win); }
+                else {
+                    glfwWindowHint(GLFW_CONTEXT_VERSION_MAJOR, 3);
+                    glfwWindowHint(GLFW_CONTEXT_VERSION_MINOR, 2);
+                    glfwWindowHint(GLFW_OPENGL_PROFILE, GLFW_OPENGL_CORE_PROFILE);
+                    glfwWindowHint(GLFW_OPENGL_FORWARD_COMPAT, GL_TRUE);
+                    glfwWindowHint(GLFW_AUTO_ICONIFY, GLFW_FALSE);
+                    GLFWwindow* e = glfwCreateWindow(mode->width, mode->height, "AVA Output", mons[m], win);
+                    if (e) {
+                        glfwMakeContextCurrent(e);
+                        glfwSwapInterval(0);
+                        glfwMakeContextCurrent(win);
+                        gExtWins.push_back(e);
+                    }
                 }
             }
+            if (on) ImGui::PopStyleColor();
+            ImGui::SameLine();
+            ImGui::TextColored(ImVec4(1, 1, 1, on ? 0.9f : 0.5f), "%s", row);
+            ImGui::PopID();
         }
-        ImGui::EndPopup();
+        if (!gExtWins.empty()) { if (ImGui::Button("Close all outputs")) closeProjectors(win); }
+        ImGui::EndGroup();
     }
 }
 
 static void drawVisualBody(GLFWwindow* win, float w) {
     ImGui::PushStyleVar(ImGuiStyleVar_ItemSpacing, ImVec2(8, 9));
     ImGui::PushStyleVar(ImGuiStyleVar_FramePadding, ImVec2(10, 7));
-    static const char* subs[3] = {"Wave", "Shaders", "Display"};
-    subNav(subs, 3, &gVisualTab, w);
-    if (gVisualTab == 0) drawWaveBody(w);
-    else if (gVisualTab == 1) drawShadersBody(w);
+    static const char* subs[2] = {"Shaders", "Display"};
+    if (gVisualTab > 1) gVisualTab = 0;
+    subNav(subs, 2, &gVisualTab, w);
+    if (gVisualTab == 0) drawShadersBody(w);
     else drawDisplayBody(win, w);
     ImGui::PopStyleVar(2);
 }
@@ -3332,7 +3473,7 @@ int main(int argc, char** argv) {
     // screenshot / automation hooks: start on a given mode + artifact sub-tab
     if (const char* m = getenv("AVA_MODE")) gMode = std::min(std::max(atoi(m), 0), 2);
     if (const char* t = getenv("AVA_ARTIFACT_TAB")) gArtifactTab = std::min(std::max(atoi(t), 0), 3);
-    if (const char* t = getenv("AVA_VISUAL_TAB")) gVisualTab = std::min(std::max(atoi(t), 0), 2);
+    if (const char* t = getenv("AVA_VISUAL_TAB")) gVisualTab = std::min(std::max(atoi(t), 0), 1);
     if (getenv("AVA_SETTINGS")) gShowHealth = true;
     if (getenv("AVA_MINI")) setMini(win, true);
     if (const char* sh = getenv("AVA_SHADER")) { gShaders.loadLibrary(shaderLibraryDir()); gShaders.load(atoi(sh)); }
@@ -3367,8 +3508,8 @@ int main(int argc, char** argv) {
         // Escape: close the projector output first, else leave fullscreen
         {
             static bool escPrev = false;
-            bool esc = glfwGetKey(win, GLFW_KEY_ESCAPE) == GLFW_PRESS ||
-                       (gExtWin && glfwGetKey(gExtWin, GLFW_KEY_ESCAPE) == GLFW_PRESS);
+            bool esc = glfwGetKey(win, GLFW_KEY_ESCAPE) == GLFW_PRESS;
+            for (auto* e : gExtWins) esc |= glfwGetKey(e, GLFW_KEY_ESCAPE) == GLFW_PRESS;
             bool popupOpen = ImGui::GetCurrentContext() &&
                              ImGui::IsPopupOpen("", ImGuiPopupFlags_AnyPopupId |
                                                         ImGuiPopupFlags_AnyPopupLevel);
@@ -3379,10 +3520,8 @@ int main(int argc, char** argv) {
                     for (int z = 0; z < NZONES; z++) setDrone(z, false);
                 } else if (gMini) {
                     setMini(win, false);
-                } else if (gExtWin) {
-                    glfwDestroyWindow(gExtWin);
-                    gExtWin = nullptr;
-                    glfwMakeContextCurrent(win);
+                } else if (!gExtWins.empty()) {
+                    closeProjectors(win);
                 } else if (macWindowIsFullscreen(win)) {
                     macWindowExitFullscreen(win);
                 }
@@ -4132,134 +4271,30 @@ int main(int argc, char** argv) {
             }
         }
 
-        // master strip
+        // the body: MASTER (input + the floaters), the five rings as scopes
+        // with their volume under each, and the engine parameters
         {
-            float mx = cardX + pad, my = bodyY + 22 + gutter, mw = cardW - 2 * pad, mh = 172;
-            dl->AddRectFilled(ImVec2(mx, my), ImVec2(mx + mw, my + mh), IM_COL32(8, 8, 9, 255), 14);
-            dl->AddRect(ImVec2(mx, my), ImVec2(mx + mw, my + mh), W(0.06f), 14);
-
-            dl->AddText(ImVec2(mx + 16, my + 12), W(0.9f), "MASTER");
-            float bpm = gEngine.analyzer.out.bpm.load();
-            int key = gEngine.analyzer.out.keyIndex.load();
-            int minor = gEngine.analyzer.out.keyMinor.load();
-            char info[96];
-            static const char* kStateName[5] = {"sleep", "dream", "calm", "focus", "peak"};
-            int bwi = std::min(std::max(gEngine.params.brainwave.load(), 0), 4);
-            snprintf(info, sizeof(info), "%.0f BPM  ·  %s%s  ·  %s %.0f Hz",
-                     bpm, kKeyNames[key], minor ? "m" : "", kStateName[bwi], kBrainwaveHz[bwi]);
-            if (gFontSmall) ImGui::PushFont(gFontSmall);
-            dl->AddText(ImVec2(mx + 84, my + 14), W(0.32f), info);
-            if (gFontSmall) ImGui::PopFont();
-            // five zone frequency lines — one string per zone, endpoints
-            // stacked at each side (HEAD top → FEET bottom); each line's wave
-            // count follows the zone's live carrier Hz, amplitude and glow
-            // follow its meter, so playing a pad makes its line surge
-            {
-                float wy = my + 40, wh = mh - 48, wx = mx + 58, ww = mw - 72;
-                static float phase[NZONES] = {0};
-                static float ampSm[NZONES] = {0};
-                float dt = ImGui::GetIO().DeltaTime;
-                const int P = 96;
-                const float lane = wh / (float)(NZONES + 1);
-                // INPUT: the music coming in, on its own line above the rings
-                {
-                    float ay = wy + lane * 0.5f;
-                    const int N = Engine::kScopeLen;
-                    int wi = gEngine.scopeW.load(std::memory_order_relaxed);
-                    int span = N / 2;                                   // the last ~170 ms
-                    int first = (wi - span + N) % N;
-                    float pk = 1e-3f;
-                    for (int i = 0; i < span; i++) pk = std::max(pk, std::fabs(gEngine.scope[(first + i) % N]));
-                    float gain = 0.9f / std::max(pk, 0.02f);
-                    float lvl = std::min(1.0f, gEngine.audioLevel.load() * 2.0f);
-                    static float inSm = 0; inSm += (lvl - inSm) * 0.1f;
-                    static ImVec2 ip[Engine::kScopeLen / 2];
-                    for (int i = 0; i < span; i++) {
-                        float t = (float)i / (span - 1);
-                        float v = gEngine.scope[(first + i) % N] * gain;
-                        float taper = std::sin(dsp::kPi * t);
-                        ip[i] = ImVec2(wx + ww * t, ay - taper * lane * 0.46f * std::max(-1.0f, std::min(1.0f, v)) * inSm);
-                    }
-                    dl->AddPolyline(ip, span, W(0.18f + 0.5f * inSm), 0, 1.0f + 1.0f * inSm);
-                    dl->AddCircleFilled(ImVec2(wx, ay), 2.0f, W(0.35f + 0.4f * inSm));
-                    dl->AddCircleFilled(ImVec2(wx + ww, ay), 2.0f, W(0.35f + 0.4f * inSm));
-                    if (gFontSmall) ImGui::PushFont(gFontSmall);
-                    ImVec2 ls = ImGui::CalcTextSize("INPUT");
-                    dl->AddText(ImVec2(wx - ls.x - 8, ay - ls.y / 2), W(0.22f + 0.4f * inSm), "INPUT");
-                    if (gFontSmall) ImGui::PopFont();
-                }
-                for (int z = 0; z < NZONES; z++) {
-                    float hz = gEngine.zoneHz[z].load();
-                    float lvl = gEngine.meter[2 + z].load();
-                    phase[z] += dt * hz * 0.35f; // slowed visual travel
-                    // five separate lanes under the input, HEAD at the top
-                    float ay = wy + lane * (z + 1.5f);
-                    float cycles = std::max(2.0f, std::min(9.0f, hz / 11.0f));
-                    float amp = 1.5f + (lane * 0.48f - 1.5f) * lvl;
-                    ampSm[z] += (amp - ampSm[z]) * 0.12f; // eased motion
-                    ImVec2 pts[P];
-                    for (int i = 0; i < P; i++) {
-                        float t = (float)i / (P - 1);
-                        float taper = std::sin(dsp::kPi * t); // pins endpoints
-                        float w = std::sin(2 * dsp::kPi * (cycles * t - phase[z]));
-                        pts[i] = ImVec2(wx + ww * t, ay + taper * ampSm[z] * w);
-                    }
-                    dl->AddPolyline(pts, P, W(0.18f + 0.5f * lvl), 0,
-                                    1.0f + 1.5f * lvl);
-                    dl->AddCircleFilled(ImVec2(wx, ay), 2.0f, W(0.35f + 0.4f * lvl));
-                    dl->AddCircleFilled(ImVec2(wx + ww, ay), 2.0f, W(0.35f + 0.4f * lvl));
-                    if (gFontSmall) ImGui::PushFont(gFontSmall);
-                    ImVec2 ls = ImGui::CalcTextSize(kZoneNames[z]);
-                    dl->AddText(ImVec2(wx - ls.x - 8, ay - ls.y / 2), W(0.22f + 0.4f * lvl), kZoneNames[z]);
-                    if (gFontSmall) ImGui::PopFont();
-                }
-            }
-        }
-
-        // zone columns: equal cells across the same inset as everything else
-        const float paramsH = 2 * 52;         // two rows of label + bar + live line
-        const float paramsY = cardY + cardH - pad - paramsH;
-        {
-            float zx = cardX + pad, zy = bodyY + 22 + gutter + 172 + gutter, zw = cardW - 2 * pad;
-            float zh = paramsY - gutter - zy;
-            float each = zw / (float)NZONES;
-            for (int z = 0; z < NZONES; z++)
-                zoneColumn(z, zx + z * each, zy, each, zh);
-        }
-
-        // engine parameters: a 5 × 2 grid on the card inset. Every cell is
-        // label · value bar · live line, so you can see each one working.
-        // (The brain-state used to be a picker here; it now comes with the
-        // preset above — Calm/Heal = theta/delta, Energy/Creative = beta/gamma.)
-        {
-            const float colGap = 18;
-            float px = cardX + pad, pw = cardW - 2 * pad;
-            float colW = (pw - 4 * colGap) / 5.0f - 10;
-            float rowH = 52;
-            auto cx = [&](int c) { return px + c * (colW + 10 + colGap); };
-            auto ry = [&](int r) { return paramsY + r * rowH; };
-            miniParam("Intensity", gEngine.params.intensity, cx(0), ry(0), colW, gEngine.liveIntensity.load());
-            miniParam("Balance", gBalance, cx(1), ry(0), colW, gEngine.liveBalance.load());
-            miniParam("Pulse", gEngine.params.pulseSync, cx(2), ry(0), colW, gEngine.livePulse.load());
-            miniParam("Flow", gEngine.params.bodyFlow, cx(3), ry(0), colW, gEngine.liveFlow.load());
-            miniParam("Warmth", gEngine.params.waveWarmth, cx(4), ry(0), colW, gEngine.liveWarmth.load());
-            miniParam("Depth", gEngine.params.subDepth, cx(0), ry(1), colW, gEngine.liveDepth.load());
-            miniParam("Breath", gEngine.params.breath, cx(1), ry(1), colW, 1.0f - gEngine.breathNow.load());
-            miniParam("Dynamics", gEngine.params.dynamics, cx(2), ry(1), colW, gEngine.liveDyn.load());
-            miniParam("Void", gEngine.params.voidAmt, cx(3), ry(1), colW, gEngine.voidNow.load());
-            miniParam("Lift", gEngine.params.lift, cx(4), ry(1), colW, gEngine.liveLift.load());
-            // Balance drives the grounded↔uplifted pair
-            float bal = gBalance.load();
-            gEngine.params.uplift.store(bal);
-            gEngine.params.grounding.store(1.0f - bal);
-            // tap/output error, if any, under the grid
+            ImGui::SetCursorScreenPos(ImVec2(cardX + pad, bodyY + 22 + gutter - 6));
+            ImGui::PushStyleColor(ImGuiCol_ChildBg, ImVec4(0, 0, 0, 0));
+            ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(0, 0));
+            ImGui::BeginChild("##audiobody", ImVec2(cardW - 2 * pad, cardY + cardH - pad - (bodyY + 22 + gutter - 6)), false,
+                              ImGuiWindowFlags_NoScrollbar);
+            ImGui::PushStyleVar(ImGuiStyleVar_ItemSpacing, ImVec2(8, 9));
+            ImGui::PushStyleVar(ImGuiStyleVar_FramePadding, ImVec2(10, 7));
+            drawWaveBody(cardW - 2 * pad, true);
+            ImGui::PopStyleVar(2);
+            // tap/output error, if any, at the bottom
+            float ey = ImGui::GetWindowPos().y + ImGui::GetWindowSize().y - 18;
             if (gTapState.load() == 1 && glfwGetTime() - gTapStartT > 4.0)
-                dl->AddText(ImVec2(px, ry(2) - 6), IM_COL32(255, 180, 90, 220),
+                dl->AddText(ImVec2(cardX + pad, ey), IM_COL32(255, 180, 90, 220),
                             "Waiting for the Mac's audio system... if this stays, run: sudo killall coreaudiod");
             else if (gTapState.load() == 2 && !gTap.running() && !gTapErr.empty())
-                dl->AddText(ImVec2(px, ry(2) - 6), IM_COL32(255, 120, 120, 200), gTapErr.c_str());
+                dl->AddText(ImVec2(cardX + pad, ey), IM_COL32(255, 120, 120, 200), gTapErr.c_str());
             else if (!gOut.running() && !gOut.lastError.empty())
-                dl->AddText(ImVec2(px, ry(2) - 6), IM_COL32(255, 120, 120, 200), gOut.lastError.c_str());
+                dl->AddText(ImVec2(cardX + pad, ey), IM_COL32(255, 120, 120, 200), gOut.lastError.c_str());
+            ImGui::EndChild();
+            ImGui::PopStyleVar();
+            ImGui::PopStyleColor();
         }
         } // gMode == 0
 
@@ -4340,13 +4375,14 @@ int main(int argc, char** argv) {
         // ── render shader passes (before ImGui draw) ──
         if (gShaders.active()) {
             AudioUniforms au;
-            au.level = gEngine.audioLevel.load();
-            au.bass = gEngine.audioBass.load();
-            au.mid = gEngine.audioMid.load();
-            au.high = gEngine.audioHigh.load();
-            au.sub = gEngine.audioSubBand.load();
-            au.lowMid = gEngine.audioLowMidBand.load();
-            au.onset = gEngine.analyzer.out.onsetFlash.load();
+            const float rx = gShaderReact;
+            au.level = gEngine.audioLevel.load() * rx;
+            au.bass = gEngine.audioBass.load() * rx;
+            au.mid = gEngine.audioMid.load() * rx;
+            au.high = gEngine.audioHigh.load() * rx;
+            au.sub = gEngine.audioSubBand.load() * rx;
+            au.lowMid = gEngine.audioLowMidBand.load() * rx;
+            au.onset = gEngine.analyzer.out.onsetFlash.load() * rx;
             au.bpm = gEngine.analyzer.out.bpm.load();
             au.spectrum = gEngine.analyzer.uiSpectrum;
             ImVec2 mp = ImGui::GetIO().MousePos;
@@ -4366,23 +4402,25 @@ int main(int argc, char** argv) {
         glfwSwapBuffers(win);
 
         // ── external display/projector output ──
-        if (gExtWin) {
-            if (glfwWindowShouldClose(gExtWin)) {
-                glfwDestroyWindow(gExtWin);
-                gExtWin = nullptr;
+        for (int i = 0; i < (int)gExtWins.size(); i++) {
+            GLFWwindow* e = gExtWins[i];
+            if (glfwWindowShouldClose(e)) {
+                glfwDestroyWindow(e);
+                gExtWins.erase(gExtWins.begin() + i);
+                i--;
                 glfwMakeContextCurrent(win);
-            } else {
-                glfwMakeContextCurrent(gExtWin);
-                int ew, eh;
-                glfwGetFramebufferSize(gExtWin, &ew, &eh);
-                glViewport(0, 0, ew, eh);
-                glClearColor(0, 0, 0, 1);
-                glClear(GL_COLOR_BUFFER_BIT);
-                if (gShaders.active())
-                    gShaders.drawFullscreen(gShaders.outputTexture(), 1.0f, gEdgeFade);
-                glfwSwapBuffers(gExtWin);
-                glfwMakeContextCurrent(win);
+                continue;
             }
+            glfwMakeContextCurrent(e);
+            int ew, eh;
+            glfwGetFramebufferSize(e, &ew, &eh);
+            glViewport(0, 0, ew, eh);
+            glClearColor(0, 0, 0, 1);
+            glClear(GL_COLOR_BUFFER_BIT);
+            if (gShaders.active())
+                gShaders.drawFullscreen(gShaders.outputTexture(), 1.0f, gEdgeFade);
+            glfwSwapBuffers(e);
+            glfwMakeContextCurrent(win);
         }
     }
 
