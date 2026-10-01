@@ -2464,7 +2464,7 @@ static void drawWaveBody(float w, bool audio = false) {
     }
     // ── RINGS · Output, with zoom and gain on the right of the header ──
     {
-        label("RINGS   ·   Output", y);
+        if (!audio) label("RINGS   ·   Output", y);   // the Audio page needs no caption
         // scope controls: TRIG · time · rate · hold · gain · FREEZE (on the
         // Audio page they fold behind the label — click it)
         static bool showCtl = false;
@@ -2508,7 +2508,7 @@ static void drawWaveBody(float w, bool audio = false) {
             if (litF) ImGui::PopStyleColor();
         }
         if (gFontSmall) ImGui::PopFont();
-        const float laneGap = 10, top = y + (ctlRow ? 46 : 22);
+        const float laneGap = 10, top = y + (ctlRow ? 46 : (audio ? 2 : 22));
         // the lanes take whatever height the card has left; on the Audio page
         // they're a full 150 and the page scrolls down to the engine grid
         float roomH = ImGui::GetWindowPos().y + ImGui::GetWindowSize().y - top - 16;
