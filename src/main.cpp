@@ -3705,7 +3705,6 @@ int main(int argc, char** argv) {
                 // ── RINGS: solo one to find it by feel ──
                 head("RINGS");
                 {
-                {
                     int solo = gEngine.params.soloZone.load();
                     for (int i = 0; i < NZONES; i++) {
                         int z = kTuneOrder[i]; // 1 = FEET … 5 = HEAD, matching the tuner
@@ -4046,12 +4045,17 @@ int main(int argc, char** argv) {
             ImGui::SetCursorScreenPos(ImVec2(p1.x - 58, by - 11));
             if (ImGui::InvisibleButton("##mini", ImVec2(44, 22))) setMini(win, true);
             {
+                // a small octagon, the thing it makes
                 bool h = ImGui::IsItemHovered();
-                if (gFontSmall) ImGui::PushFont(gFontSmall);
-                ImVec2 ts = ImGui::CalcTextSize("mini");
-                dl->AddText(ImVec2(p1.x - 36 - ts.x / 2, by - ts.y / 2), W(h ? 0.95f : 0.45f), "mini");
-                if (gFontSmall) ImGui::PopFont();
-                if (h) ImGui::SetTooltip("float a small octagon over your other apps");
+                ImVec2 mc(p1.x - 36, by);
+                ImVec2 op[8];
+                for (int k = 0; k < 8; k++) {
+                    float a = -dsp::kPi / 2 + dsp::kPi / 8 + k * dsp::kPi / 4;
+                    op[k] = ImVec2(mc.x + 7.5f * std::cos(a), mc.y + 7.5f * std::sin(a));
+                }
+                dl->AddPolyline(op, 8, W(h ? 0.95f : 0.45f), ImDrawFlags_Closed, 1.5f);
+                dl->AddCircleFilled(mc, 1.8f, W(h ? 0.95f : 0.45f), 12);
+                if (h) ImGui::SetTooltip("mini: float a small octagon over your other apps");
             }
             // volume slider
             float sx0 = bx + 66, sx1 = p1.x - 110, sy = by;
