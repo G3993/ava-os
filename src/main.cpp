@@ -2429,9 +2429,9 @@ static void drawWaveBody(float w, bool audio = false) {
                 if (gFontSmall) ImGui::PushFont(gFontSmall);
                 // V = the volume, S = the signal (the live level line under it)
                 char vt[8]; snprintf(vt, sizeof vt, "%.0f", v * 100);
-                ImVec2 vs = ImGui::CalcTextSize(vt);
-                dl->AddText(ImVec2(o.x + 12, ly + lane - volH + 7), W(0.5f), vt);
-                dl->AddText(ImVec2(o.x + 12 + vs.x + 5, ly + lane - volH + 7), LB(0.55f), "V");
+                float lw = ImGui::CalcTextSize("V").x;
+                dl->AddText(ImVec2(o.x + 12, ly + lane - volH + 7), LB(0.55f), "V");
+                dl->AddText(ImVec2(o.x + 12 + lw + 6, ly + lane - volH + 7), W(0.5f), vt);
                 dl->AddText(ImVec2(o.x + 12, ly + lane - 13), W(0.32f), "S");
                 if (gFontSmall) ImGui::PopFont();
             }
