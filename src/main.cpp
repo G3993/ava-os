@@ -2133,19 +2133,26 @@ static void drawWaveBody(float w) {
     };
     // ── MASTER · Input ──
     {
-        label(gShowSpectrum ? "MASTER   ·   Spectrum" : "MASTER   ·   Input", y);
-        float hh = gVecBig ? std::min(w * 0.6f, 330.0f) : 170.0f, top = y + 18;
-        const float vs = hh;                       // the XY square, centred over the wave
-        float wx0 = o.x;                           // the wave runs the whole width; the figure overlays it
-        dl->AddRectFilled(ImVec2(o.x, top), ImVec2(o.x + w, top + hh), IM_COL32(8, 8, 9, 255), 12);
-        graticule(wx0 + 4, top + 6, o.x + w - 8, top + hh - 6);
+        // the same card as the Audio tab's MASTER: same size, same place, the
+        // title inside its top-left, content under a 40 px header
+        float hh = gVecBig ? std::min(w * 0.6f, 330.0f) : 172.0f, top = y + 6;
+        const float cy0 = top + 36, cy1 = top + hh - 8;      // content band
+        const float vs = cy1 - cy0;                          // the XY square, over the start of the wave
+        float wx0 = o.x;
+        dl->AddRectFilled(ImVec2(o.x, top), ImVec2(o.x + w, top + hh), IM_COL32(8, 8, 9, 255), 14);
+        dl->AddRect(ImVec2(o.x, top), ImVec2(o.x + w, top + hh), W(0.06f), 14);
+        dl->AddText(ImVec2(o.x + 16, top + 12), W(0.9f), "MASTER");
+        if (gFontSmall) ImGui::PushFont(gFontSmall);
+        dl->AddText(ImVec2(o.x + 84, top + 14), W(0.32f), gShowSpectrum ? "Spectrum" : "Input");
+        if (gFontSmall) ImGui::PopFont();
+        graticule(wx0 + 12, cy0, o.x + w - 12, cy1);
         if (gShowSpectrum) {
             // spectrum, log frequency 20 Hz - 16 kHz, 64 bars with a slow peak line
             const int bars = 64;
             static float sm[64] = {0}, pk[64] = {0};
             const int B = StreamAnalyzer::kSpecBins;
             const float binHz = 48000.0f / 2.0f / B;            // Hz per ui bin
-            float gx0 = wx0 + 8, gx1 = o.x + w - 12, gw = gx1 - gx0, base = top + hh - 10, gh = hh - 22;
+            float gx0 = wx0 + 16, gx1 = o.x + w - 16, gw = gx1 - gx0, base = cy1 - 4, gh = cy1 - cy0 - 16;
             float bw = gw / bars;
             for (int b = 0; b < bars; b++) {
                 float f0 = 20.0f * std::pow(800.0f, b / (float)bars), f1 = 20.0f * std::pow(800.0f, (b + 1) / (float)bars);
@@ -2174,19 +2181,19 @@ static void drawWaveBody(float w) {
             // auto-scale the input like the rings, so a quiet song still draws a wave
             float g = gScopeGain * 0.9f / std::max(peakOf(gEngine.scope), 0.02f);
             // the line begins at the sphere in the figure's centre
-            float figCx = o.x + vs / 2 + 6;
-            trace(0, gEngine.scope, gVecMode == 5 ? figCx : wx0 + 8, o.x + w - 12, top + hh / 2, hh * 0.42f, g);
+            float figCx = o.x + 16 + vs / 2;
+            trace(0, gEngine.scope, gVecMode == 5 ? figCx : wx0 + 16, o.x + w - 16, (cy0 + cy1) / 2, vs * 0.42f, g);
         }
         {
             // the label swaps wave / spectrum
-            ImGui::SetCursorScreenPos(ImVec2(o.x, y - 2));
-            if (ImGui::InvisibleButton("##masterswap", ImVec2(160, 18))) gShowSpectrum = !gShowSpectrum;
+            ImGui::SetCursorScreenPos(ImVec2(o.x + 12, top + 8));
+            if (ImGui::InvisibleButton("##masterswap", ImVec2(150, 24))) gShowSpectrum = !gShowSpectrum;
             if (ImGui::IsItemHovered()) ImGui::SetTooltip(gShowSpectrum ? "click: input wave" : "click: spectrum");
         }
         // ── vectorscope: L against R, turned 45° so mono is a vertical line,
         //    width opens it into a cloud; the last ~21 ms of samples ──
         {
-            ImVec2 c(o.x + vs / 2 + 6, top + hh / 2);   // left, over the start of the wave
+            ImVec2 c(o.x + 16 + vs / 2, (cy0 + cy1) / 2);   // left, over the start of the wave
             float r = vs * 0.44f;
             // click the scope to grow / shrink it
             ImGui::SetCursorScreenPos(ImVec2(c.x - r, c.y - r));
@@ -2418,7 +2425,7 @@ static void drawWaveBody(float w) {
                 if (gFontSmall) ImGui::PopFont();
             }
         }
-        y = top + hh + 18;
+        y = top + hh + 24;
     }
     // ── RINGS · Output, with zoom and gain on the right of the header ──
     {
