@@ -2509,10 +2509,10 @@ static void drawWaveBody(float w, bool audio = false) {
         }
         if (gFontSmall) ImGui::PopFont();
         const float laneGap = 10, top = y + (ctlRow ? 46 : 22);
-        const float paramsH = audio ? 2 * 46 + 14 : 0;        // the engine grid under the lanes
-        // the lanes take whatever height the card has left
-        float roomH = ImGui::GetWindowPos().y + ImGui::GetWindowSize().y - top - 16 - paramsH;
-        const float lane = std::max(44.0f, std::min(audio ? 150.0f : 110.0f, (roomH - 4 * laneGap) / NZONES));
+        // the lanes take whatever height the card has left; on the Audio page
+        // they're a full 150 and the page scrolls down to the engine grid
+        float roomH = ImGui::GetWindowPos().y + ImGui::GetWindowSize().y - top - 16;
+        const float lane = audio ? 150.0f : std::max(44.0f, std::min(110.0f, (roomH - 4 * laneGap) / NZONES));
         const float volH = audio ? 16.0f : 0.0f;              // the volume strip under the wave
         for (int z = 0; z < NZONES; z++) {
             float ly = top + z * (lane + laneGap), mid = ly + (lane - volH) / 2 + 1, amp = (lane - volH) * 0.42f;
@@ -2523,14 +2523,22 @@ static void drawWaveBody(float w, bool audio = false) {
                 ImGui::PushStyleVar(ImGuiStyleVar_FramePadding, ImVec2(0, 0));
                 ImGui::PushStyleVar(ImGuiStyleVar_GrabMinSize, 6.0f);
                 ImGui::PushStyleVar(ImGuiStyleVar_FrameRounding, 4.0f);
+                // the volume is blue: the grab, the filled part, the live level
+                ImGui::PushStyleColor(ImGuiCol_SliderGrab, ImVec4(150 / 255.0f, 205 / 255.0f, 1.0f, 0.95f));
+                ImGui::PushStyleColor(ImGuiCol_SliderGrabActive, ImVec4(190 / 255.0f, 225 / 255.0f, 1.0f, 1.0f));
                 ImGui::SetCursorScreenPos(ImVec2(o.x + 68, ly + lane - volH + 2));
                 ImGui::SetNextItemWidth(w - 76);
                 char vid[16]; snprintf(vid, sizeof vid, "##vol%d", z);
                 float v = gZoneSlider[z];
                 if (ImGui::SliderFloat(vid, &v, 0.0f, 1.0f, "")) { gZoneSlider[z] = v; gEngine.params.zoneLevel[z].store(v); }
+                {
+                    ImVec2 r0 = ImGui::GetItemRectMin(), r1 = ImGui::GetItemRectMax();
+                    dl->AddRectFilled(ImVec2(r0.x, r0.y), ImVec2(r0.x + (r1.x - r0.x) * v, r1.y), LB(0.18f), 4.0f);
+                }
+                ImGui::PopStyleColor(2);
                 ImGui::PopStyleVar(3);
                 float lv = gEngine.meter[2 + z].load();
-                dl->AddLine(ImVec2(o.x + 68, ly + lane - 2), ImVec2(o.x + 68 + (w - 76) * lv, ly + lane - 2), W(0.5f), 1.0f);
+                dl->AddLine(ImVec2(o.x + 68, ly + lane - 2), ImVec2(o.x + 68 + (w - 76) * lv, ly + lane - 2), LB(0.8f), 1.5f);
                 if (gFontSmall) ImGui::PushFont(gFontSmall);
                 char vt[8]; snprintf(vt, sizeof vt, "%.0f", v * 100);
                 dl->AddText(ImVec2(o.x + 12, ly + lane - volH + 1), W(0.5f), vt);
@@ -2551,8 +2559,8 @@ static void drawWaveBody(float w, bool audio = false) {
             const float colGap = 18;
             float px = o.x, pw = w;
             float colW = (pw - 4 * colGap) / 5.0f - 10;
-            float rowH = 46;
-            float paramsY = ImGui::GetWindowPos().y + ImGui::GetWindowSize().y - 14 - 2 * 46;
+            float rowH = 52;
+            float paramsY = y + 18;                       // below the lanes: scroll down to it
             auto cx = [&](int c) { return px + c * (colW + 10 + colGap); };
             auto ry = [&](int r) { return paramsY + r * rowH; };
             miniParam("Intensity", gEngine.params.intensity, cx(0), ry(0), colW, gEngine.liveIntensity.load());
@@ -2568,7 +2576,7 @@ static void drawWaveBody(float w, bool audio = false) {
             float bal = gBalance.load();
             gEngine.params.uplift.store(bal);
             gEngine.params.grounding.store(1.0f - bal);
-            y = paramsY + 2 * rowH;
+            y = paramsY + 2 * rowH + 16;
         }
     }
     ImGui::SetCursorScreenPos(ImVec2(o.x, y));
@@ -4287,7 +4295,7 @@ int main(int argc, char** argv) {
             ImGui::PushStyleColor(ImGuiCol_ChildBg, ImVec4(0, 0, 0, 0));
             ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(0, 0));
             ImGui::BeginChild("##audiobody", ImVec2(cardW - 2 * pad, cardY + cardH - pad - (bodyY + 22 + gutter - 6)), false,
-                              ImGuiWindowFlags_NoScrollbar);
+                              ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_AlwaysVerticalScrollbar * 0);
             ImGui::PushStyleVar(ImGuiStyleVar_ItemSpacing, ImVec2(8, 9));
             ImGui::PushStyleVar(ImGuiStyleVar_FramePadding, ImVec2(10, 7));
             drawWaveBody(cardW - 2 * pad, true);
