@@ -1395,37 +1395,7 @@ static void drawTunerBody() {
     const float x0 = ImGui::GetCursorScreenPos().x;
     const float cxm = x0 + w / 2;                     // everything hangs off this centre line
 
-    // ── row 1, centred: tunings · LEARN · DRONE ALL ──
-    {
-        const char* learnLbl = gLearnSel >= 0 ? "MOVE A KNOB..." : (gLearnArmed ? "LEARN: pick a cell" : "LEARN");
-        const char* droneLbl = anyDrone ? "RELEASE" : "DRONE ALL";
-        const float padX = ImGui::GetStyle().FramePadding.x * 2, sp = ImGui::GetStyle().ItemSpacing.x;
-        float total = 0;
-        for (int t = 0; t < kNumTunings; t++) total += ImGui::CalcTextSize(kTunings[t].name).x + padX + sp;
-        total += 26 + ImGui::CalcTextSize(learnLbl).x + padX + sp + ImGui::CalcTextSize(droneLbl).x + padX;
-        ImGui::SetCursorPosX(ImGui::GetCursorPosX() + std::max(0.0f, (w - total) / 2));
-        for (int t = 0; t < kNumTunings; t++) {
-            if (t) ImGui::SameLine();
-            if (ImGui::Button(kTunings[t].name)) {
-                for (int z = 0; z < NZONES; z++) setZoneHz(z, kTunings[t].hz[z]);
-                gTunerDirtyT = now;
-            }
-            if (ImGui::IsItemHovered()) ImGui::SetTooltip("%s", kTunings[t].note);
-        }
-        ImGui::SameLine(0, 26);
-        {
-            bool lit = gLearnArmed;
-            if (lit) ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(1, 1, 1, 0.22f));
-            if (ImGui::Button(learnLbl)) { gLearnArmed = !gLearnArmed; gLearnSel = -1; }
-            if (lit) ImGui::PopStyleColor();
-            if (ImGui::IsItemHovered())
-                ImGui::SetTooltip("arm, click an orb / HZ / LVL cell, then move a knob on your controller");
-        }
-        ImGui::SameLine();
-        if (ImGui::Button(droneLbl))
-            for (int z = 0; z < NZONES; z++) setDrone(z, !anyDrone);
-    }
-    // ── row 2, centred: the engine — SYNTH · SPLIT · MONO · STEREO · SPATIAL,
+    // ── the engine, centred: SYNTH · SPLIT · MONO · STEREO · SPATIAL,
     //    and the one or two settings each mode has ──
     {
         static const char* modes[5] = {"SYNTH", "SPLIT", "MONO", "STEREO", "SPATIAL"};
@@ -2069,10 +2039,12 @@ static float gScopeRate = 12.0f;  // refreshes per second; low = calm, 60 = live
 static float gScopeHold = 0.35f;  // frame blending 0..0.95: how much of the last picture stays
 static bool  gScopeFreeze = false;
 static bool gVecBig = false;      // vectorscope: small beside the wave, or large
-static int  gVecMode = 4;         // 0 = input L/R · 1 = HEAD×FEET · 2 = HEART×BELLY · 3 = ROOT×FEET (ring Lissajous) · 4 = FLOATERS (the mark's animation) · 5 = FIGURE (one character warping through shapes)
+static int  gVecMode = 5;         // 0 = input L/R · 1 = HEAD×FEET · 2 = HEART×BELLY · 3 = ROOT×FEET (ring Lissajous) · 4 = FLOATERS (the mark's animation) · 5 = FIGURE (one character warping through shapes)
 static bool gShowSpectrum = false; // MASTER right side: the input wave (default) or the spectrum; click the label
 static int  gAnimLoops = 0, gAnimLoopLen[8];   // the floaters frame on screen: its closed loops
-static float gFigGate = 0.0f;                  // FIGURE: 1 = alive on the input, 0 = faded away in silence
+static float gFigGate = 0.0f;                  // FIGURE: 1 = alive on the input, 0 = collapsed into the sphere
+static const float kSphereR = 0.14f;            // the sphere's radius in scope units
+static float gFigSwell = 0.8f;                 // the figure's current scale
 // phosphor: the scope traces glow green on a graticule, like the instrument
 static inline ImU32 PH(float a) { return IM_COL32(255, 255, 255, (int)(255 * std::min(1.0f, std::max(0.0f, a)))); }
 static void drawWaveBody(float w) {
@@ -2201,7 +2173,9 @@ static void drawWaveBody(float w) {
         } else {
             // auto-scale the input like the rings, so a quiet song still draws a wave
             float g = gScopeGain * 0.9f / std::max(peakOf(gEngine.scope), 0.02f);
-            trace(0, gEngine.scope, wx0 + 8, o.x + w - 12, top + hh / 2, hh * 0.42f, g);
+            // the line begins at the sphere in the figure's centre
+            float figCx = o.x + vs / 2 + 6;
+            trace(0, gEngine.scope, gVecMode == 5 ? figCx : wx0 + 8, o.x + w - 12, top + hh / 2, hh * 0.42f, g);
         }
         {
             // the label swaps wave / spectrum
@@ -2221,28 +2195,6 @@ static void drawWaveBody(float w) {
             if (vh && ImGui::IsMouseClicked(1)) gVecMode = (gVecMode + 1) % 6;
             static const char* vecNames[6] = {"L / R", "HEAD x FEET", "HEART x BELLY", "ROOT x FEET", "FLOATERS", "FIGURE"};
             if (vh) { ImGui::SetTooltip("%s\nclick: %s  ·  right-click: next pair", vecNames[gVecMode], gVecBig ? "smaller" : "bigger"); ImGui::SetMouseCursor(ImGuiMouseCursor_Hand); }
-            // the screen: a single slice of the octagon (its four rings, widest
-            // at the top) in dark grey behind the beam, instead of a round face
-            {
-                // the slice's four rounded trapezoids, from singleslice.svg (700.54 x 467.37)
-                static const float slice[4][4] = {   // top y, top x0..x1, bottom x0..x1 (bottom y = top y + 111)
-                    {  1.50f,   2.55f, 698.00f},
-                    {119.29f,  51.34f, 649.20f},
-                    {237.08f, 100.15f, 600.29f},
-                    {354.87f, 148.79f, 551.53f},
-                };
-                static const float sliceBot[4][2] = {{49.81f, 650.74f}, {98.60f, 601.82f}, {147.49f, 552.90f}, {195.55f, 504.28f}};
-                const float sw = 700.54f, sh = 467.37f;
-                float sc = 2.0f * r * 0.96f / sw;
-                ImVec2 org(c.x - sw * sc / 2, c.y - sh * sc / 2);
-                for (int k = 0; k < 4; k++) {
-                    float ty = slice[k][0], by = ty + 111.0f;
-                    ImVec2 q[4] = {
-                        ImVec2(org.x + slice[k][1] * sc, org.y + ty * sc), ImVec2(org.x + slice[k][2] * sc, org.y + ty * sc),
-                        ImVec2(org.x + sliceBot[k][1] * sc, org.y + by * sc), ImVec2(org.x + sliceBot[k][0] * sc, org.y + by * sc)};
-                    roundedPolyFill(dl, q, 4, 12.0f * sc, IM_COL32(255, 255, 255, vh ? 26 : 18), IM_COL32(255, 255, 255, 34), 1.0f);
-                }
-            }
             // the picture: unit-square XY points, refreshed at the scope rate
             static float vx[Engine::kVecLen], vy[Engine::kVecLen];
             static int vn = 0;
@@ -2299,7 +2251,8 @@ static void drawWaveBody(float w) {
                 // the ease: a fraction of the remaining distance per second,
                 // faster with momentum — an exponential glide, so arrivals
                 // are soft and the next departure is already under way
-                float k = (1.0f - std::exp(-dt * (2.6f + 6.0f * mom))) * move;
+                // (the glide never stops: in silence it carries the figure into the sphere)
+                float k = (1.0f - std::exp(-dt * (2.6f + 6.0f * mom))) * std::max(move, 0.5f);
                 sc += (scT - sc) * k * 0.7f;
                 // glitch bands from the sound: on a hit, 1-3 horizontal bands
                 // tear sideways and snap toward the target, healing over ~150 ms
@@ -2314,9 +2267,17 @@ static void drawWaveBody(float w) {
                 if (gT > 0.0f) gT -= dt;
                 float breathe = 1.0f + 0.012f * gate * std::sin((float)now * 1.4f);
                 float swell = sc * breathe * (1.0f + 0.02f * lvl);
+                gFigSwell = swell;
                 vn = kFigLen;
                 for (int i = 0; i < kFigLen; i++) {
                     float tx = kFigXY[fig][i * 2] / 32767.0f, ty = kFigXY[fig][i * 2 + 1] / 32767.0f;
+                    // no music: the target is a small sphere at the centre, the
+                    // point the input line ends at (same start, same winding)
+                    {
+                        float u = i * dsp::kTwoPi / kFigLen;
+                        float cxp = kSphereR * std::sin(u), cyp = kSphereR * std::cos(u);
+                        tx = cxp + (tx - cxp) * gFigGate; ty = cyp + (ty - cyp) * gFigGate;
+                    }
                     cur[i][0] += (tx - cur[i][0]) * k;
                     cur[i][1] += (ty - cur[i][1]) * k;
                     float x = cur[i][0], y = cur[i][1];
@@ -2417,7 +2378,18 @@ static void drawWaveBody(float w) {
             if (gVecMode == 4 || gVecMode == 5) {
                 // each figure is a closed loop; the beam is blanked between them.
                 // FIGURE fades with the input gate
-                float ba = gVecMode == 5 ? gFigGate : 1.0f;
+                float ba = 1.0f;
+                if (gVecMode == 5) {
+                    // the sphere itself, solid as the figure settles into it
+                    float sa = 1.0f - gFigGate;
+                    if (sa > 0.02f) {
+                        float sr = kSphereR * r * gFigSwell;
+                        ImVec2 light(c.x - sr * 0.35f, c.y - sr * 0.38f);
+                        shadedDisc(dl, c, sr * 2.4f, c, W(0.10f * sa), W(0.0f), 48);
+                        shadedDisc(dl, c, sr, light, W(0.95f * sa), W(0.18f * sa), 64);
+                        shadedDisc(dl, light, sr * 0.34f, light, IM_COL32(255, 255, 255, (int)(255 * sa)), IM_COL32(255, 255, 255, 0), 32);
+                    }
+                }
                 int o2 = 0;
                 for (int f = 0; f < gAnimLoops && o2 + gAnimLoopLen[f] <= vn && ba > 0.01f; f++) {
                     int n = gAnimLoopLen[f];
@@ -4155,7 +4127,7 @@ int main(int argc, char** argv) {
 
         // master strip
         {
-            float mx = cardX + pad, my = bodyY + 22 + gutter, mw = cardW - 2 * pad, mh = 150;
+            float mx = cardX + pad, my = bodyY + 22 + gutter, mw = cardW - 2 * pad, mh = 172;
             dl->AddRectFilled(ImVec2(mx, my), ImVec2(mx + mw, my + mh), IM_COL32(8, 8, 9, 255), 14);
             dl->AddRect(ImVec2(mx, my), ImVec2(mx + mw, my + mh), W(0.06f), 14);
 
@@ -4181,14 +4153,40 @@ int main(int argc, char** argv) {
                 static float ampSm[NZONES] = {0};
                 float dt = ImGui::GetIO().DeltaTime;
                 const int P = 96;
+                const float lane = wh / (float)(NZONES + 1);
+                // INPUT: the music coming in, on its own line above the rings
+                {
+                    float ay = wy + lane * 0.5f;
+                    const int N = Engine::kScopeLen;
+                    int wi = gEngine.scopeW.load(std::memory_order_relaxed);
+                    int span = N / 2;                                   // the last ~170 ms
+                    int first = (wi - span + N) % N;
+                    float pk = 1e-3f;
+                    for (int i = 0; i < span; i++) pk = std::max(pk, std::fabs(gEngine.scope[(first + i) % N]));
+                    float gain = 0.9f / std::max(pk, 0.02f);
+                    float lvl = std::min(1.0f, gEngine.audioLevel.load() * 2.0f);
+                    static float inSm = 0; inSm += (lvl - inSm) * 0.1f;
+                    static ImVec2 ip[Engine::kScopeLen / 2];
+                    for (int i = 0; i < span; i++) {
+                        float t = (float)i / (span - 1);
+                        float v = gEngine.scope[(first + i) % N] * gain;
+                        float taper = std::sin(dsp::kPi * t);
+                        ip[i] = ImVec2(wx + ww * t, ay - taper * lane * 0.46f * std::max(-1.0f, std::min(1.0f, v)) * inSm);
+                    }
+                    dl->AddPolyline(ip, span, W(0.18f + 0.5f * inSm), 0, 1.0f + 1.0f * inSm);
+                    dl->AddCircleFilled(ImVec2(wx, ay), 2.0f, W(0.35f + 0.4f * inSm));
+                    dl->AddCircleFilled(ImVec2(wx + ww, ay), 2.0f, W(0.35f + 0.4f * inSm));
+                    if (gFontSmall) ImGui::PushFont(gFontSmall);
+                    ImVec2 ls = ImGui::CalcTextSize("INPUT");
+                    dl->AddText(ImVec2(wx - ls.x - 8, ay - ls.y / 2), W(0.22f + 0.4f * inSm), "INPUT");
+                    if (gFontSmall) ImGui::PopFont();
+                }
                 for (int z = 0; z < NZONES; z++) {
                     float hz = gEngine.zoneHz[z].load();
                     float lvl = gEngine.meter[2 + z].load();
                     phase[z] += dt * hz * 0.35f; // slowed visual travel
-                    // five separate lanes, HEAD at the top, so each layer's own
-                    // motion reads on its own line
-                    float lane = wh / (float)NZONES;
-                    float ay = wy + lane * (z + 0.5f);
+                    // five separate lanes under the input, HEAD at the top
+                    float ay = wy + lane * (z + 1.5f);
                     float cycles = std::max(2.0f, std::min(9.0f, hz / 11.0f));
                     float amp = 1.5f + (lane * 0.48f - 1.5f) * lvl;
                     ampSm[z] += (amp - ampSm[z]) * 0.12f; // eased motion
@@ -4215,7 +4213,7 @@ int main(int argc, char** argv) {
         const float paramsH = 2 * 52;         // two rows of label + bar + live line
         const float paramsY = cardY + cardH - pad - paramsH;
         {
-            float zx = cardX + pad, zy = bodyY + 22 + gutter + 150 + gutter, zw = cardW - 2 * pad;
+            float zx = cardX + pad, zy = bodyY + 22 + gutter + 172 + gutter, zw = cardW - 2 * pad;
             float zh = paramsY - gutter - zy;
             float each = zw / (float)NZONES;
             for (int z = 0; z < NZONES; z++)
