@@ -2014,7 +2014,7 @@ static float gScopeRate = 12.0f;  // refreshes per second; low = calm, 60 = live
 static float gScopeHold = 0.35f;  // frame blending 0..0.95: how much of the last picture stays
 static bool  gScopeFreeze = false;
 static bool gVecBig = false;      // vectorscope: small beside the wave, or large
-static int  gVecMode = 5;         // 0 = input L/R · 1 = HEAD×FEET · 2 = HEART×BELLY · 3 = ROOT×FEET (ring Lissajous) · 4 = FLOATERS (the mark's animation) · 5 = FIGURE (one character warping through shapes)
+static int  gVecMode = 4;         // 0 = input L/R · 1 = HEAD×FEET · 2 = HEART×BELLY · 3 = ROOT×FEET (ring Lissajous) · 4 = FLOATERS (the mark's animation) · 5 = FIGURE (one character warping through shapes)
 static bool gShowSpectrum = false; // MASTER right side: the input wave (default) or the spectrum; click the label
 static int  gAnimLoops = 0, gAnimLoopLen[8];   // the floaters frame on screen: its closed loops
 static float gFigGate = 0.0f;                  // FIGURE: 1 = alive on the input, 0 = faded away in silence
@@ -2157,7 +2157,7 @@ static void drawWaveBody(float w) {
         // ── vectorscope: L against R, turned 45° so mono is a vertical line,
         //    width opens it into a cloud; the last ~21 ms of samples ──
         {
-            ImVec2 c(o.x + w / 2, top + hh / 2);
+            ImVec2 c(o.x + vs / 2 + 6, top + hh / 2);   // left, over the start of the wave
             float r = vs * 0.44f;
             // click the scope to grow / shrink it
             ImGui::SetCursorScreenPos(ImVec2(c.x - r, c.y - r));
