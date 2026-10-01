@@ -54,10 +54,12 @@ set(AVA_COMMON_SRC
 
 if(APPLE)
   set(AVA_ICON "${CMAKE_SOURCE_DIR}/assets/AVA OS.icns")
-  set_source_files_properties(${AVA_ICON} PROPERTIES MACOSX_PACKAGE_LOCATION Resources)
+  set(AVA_FONT "${CMAKE_SOURCE_DIR}/assets/Coolvetica.ttf")
+  set_source_files_properties(${AVA_ICON} ${AVA_FONT} PROPERTIES MACOSX_PACKAGE_LOCATION Resources)
   add_executable(AVAOS MACOSX_BUNDLE
     ${AVA_COMMON_SRC}
     ${AVA_ICON}
+    ${AVA_FONT}
     src/audio_out.cpp
     src/capture_tap.mm
     src/audio_in.mm

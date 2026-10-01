@@ -3324,11 +3324,24 @@ int main(int argc, char** argv) {
     grb.AddRanges(io.Fonts->GetGlyphRangesDefault());
     grb.AddRanges(io.Fonts->GetGlyphRangesGreek());
     grb.BuildRanges(&granges);
-    ImFont* fontM = io.Fonts->AddFontFromFileTTF("/System/Library/Fonts/Helvetica.ttc",
-                                                 15.0f, nullptr, granges.Data);
+    // Coolvetica rides in the bundle (Resources); Helvetica if it's missing
+    std::string fontPath = "/System/Library/Fonts/Helvetica.ttc";
+    {
+#ifdef __APPLE__
+        char exe[2048]; uint32_t sz = sizeof(exe);
+        if (_NSGetExecutablePath(exe, &sz) == 0) {
+            std::string cand = std::string(dirname(exe)) + "/../Resources/Coolvetica.ttf";
+            struct stat st{};
+            if (stat(cand.c_str(), &st) == 0) fontPath = cand;
+            else if (stat("/Users/lu/soundtemple-os/assets/Coolvetica.ttf", &st) == 0) fontPath = "/Users/lu/soundtemple-os/assets/Coolvetica.ttf";
+        }
+#endif
+    }
+    const bool coolvetica = fontPath.find("Coolvetica") != std::string::npos;
+    // Coolvetica runs small and tight for its size: a touch larger than Helvetica was
+    ImFont* fontM = io.Fonts->AddFontFromFileTTF(fontPath.c_str(), coolvetica ? 17.0f : 15.0f, nullptr, granges.Data);
     if (!fontM) io.Fonts->AddFontDefault();
-    gFontSmall = io.Fonts->AddFontFromFileTTF("/System/Library/Fonts/Helvetica.ttc",
-                                              12.0f, nullptr, granges.Data);
+    gFontSmall = io.Fonts->AddFontFromFileTTF(fontPath.c_str(), coolvetica ? 13.5f : 12.0f, nullptr, granges.Data);
     ImGui_ImplGlfw_InitForOpenGL(win, true);
     ImGui_ImplOpenGL3_Init("#version 150");
 
