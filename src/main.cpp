@@ -2413,11 +2413,13 @@ static void drawWaveBody(float w, bool audio = false) {
                 // the volume is blue: the grab, the filled part, the live level
                 ImGui::PushStyleColor(ImGuiCol_SliderGrab, ImVec4(150 / 255.0f, 205 / 255.0f, 1.0f, 0.95f));
                 ImGui::PushStyleColor(ImGuiCol_SliderGrabActive, ImVec4(190 / 255.0f, 225 / 255.0f, 1.0f, 1.0f));
-                ImGui::SetCursorScreenPos(ImVec2(o.x + 68, ly + lane - volH + 9));
+                ImGui::SetCursorScreenPos(ImVec2(o.x + 68, ly + lane - volH + 11));
                 ImGui::SetNextItemWidth(w - 76);
                 char vid[16]; snprintf(vid, sizeof vid, "##vol%d", z);
                 float v = gZoneSlider[z];
+                if (gFontSmall) ImGui::PushFont(gFontSmall);   // a thinner strip: the frame follows the font
                 if (ImGui::SliderFloat(vid, &v, 0.0f, 1.0f, "")) { gZoneSlider[z] = v; gEngine.params.zoneLevel[z].store(v); }
+                if (gFontSmall) ImGui::PopFont();
                 {
                     ImVec2 r0 = ImGui::GetItemRectMin(), r1 = ImGui::GetItemRectMax();
                     dl->AddRectFilled(ImVec2(r0.x, r0.y), ImVec2(r0.x + (r1.x - r0.x) * v, r1.y), LB(0.18f), 4.0f);
