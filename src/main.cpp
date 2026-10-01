@@ -2512,12 +2512,17 @@ static void drawWaveBody(float w, bool audio = false) {
         // the lanes take whatever height the card has left; on the Audio page
         // they're a full 150 and the page scrolls down to the engine grid
         float roomH = ImGui::GetWindowPos().y + ImGui::GetWindowSize().y - top - 16;
-        const float lane = audio ? 76.0f : std::max(44.0f, std::min(110.0f, (roomH - 4 * laneGap) / NZONES));
-        const float volH = audio ? 16.0f : 0.0f;              // the volume strip under the wave
+        const float lane = audio ? 84.0f : std::max(44.0f, std::min(110.0f, (roomH - 4 * laneGap) / NZONES));
+        const float volH = audio ? 24.0f : 0.0f;              // the volume strip under the wave, with room beneath
         for (int z = 0; z < NZONES; z++) {
             float ly = top + z * (lane + laneGap), mid = ly + (lane - volH) / 2 + 1, amp = (lane - volH) * 0.42f;
             dl->AddRectFilled(ImVec2(o.x, ly), ImVec2(o.x + w, ly + lane), IM_COL32(8, 8, 9, 255), 10);
-            graticule(o.x + 68, ly + 4, o.x + w - 8, ly + lane - volH - 2);
+            if (audio) {
+                dl->AddRectFilled(ImVec2(o.x + 68, ly + 4), ImVec2(o.x + w - 8, ly + lane - volH - 2), IM_COL32(4, 4, 5, 255), 6);
+                dl->AddLine(ImVec2(o.x + 72, mid), ImVec2(o.x + w - 12, mid), W(0.06f), 1.0f);
+            } else {
+                graticule(o.x + 68, ly + 4, o.x + w - 8, ly + lane - volH - 2);
+            }
             if (audio) {
                 // volume: a thin slider the width of the wave, the live level as a hairline over it
                 ImGui::PushStyleVar(ImGuiStyleVar_FramePadding, ImVec2(0, 0));
@@ -2526,7 +2531,7 @@ static void drawWaveBody(float w, bool audio = false) {
                 // the volume is blue: the grab, the filled part, the live level
                 ImGui::PushStyleColor(ImGuiCol_SliderGrab, ImVec4(150 / 255.0f, 205 / 255.0f, 1.0f, 0.95f));
                 ImGui::PushStyleColor(ImGuiCol_SliderGrabActive, ImVec4(190 / 255.0f, 225 / 255.0f, 1.0f, 1.0f));
-                ImGui::SetCursorScreenPos(ImVec2(o.x + 68, ly + lane - volH + 2));
+                ImGui::SetCursorScreenPos(ImVec2(o.x + 68, ly + lane - volH + 1));
                 ImGui::SetNextItemWidth(w - 76);
                 char vid[16]; snprintf(vid, sizeof vid, "##vol%d", z);
                 float v = gZoneSlider[z];
@@ -2538,10 +2543,10 @@ static void drawWaveBody(float w, bool audio = false) {
                 ImGui::PopStyleColor(2);
                 ImGui::PopStyleVar(3);
                 float lv = gEngine.meter[2 + z].load();
-                dl->AddLine(ImVec2(o.x + 68, ly + lane - 2), ImVec2(o.x + 68 + (w - 76) * lv, ly + lane - 2), LB(0.8f), 1.5f);
+                dl->AddLine(ImVec2(o.x + 68, ly + lane - 6), ImVec2(o.x + 68 + (w - 76) * lv, ly + lane - 6), LB(0.8f), 1.5f);
                 if (gFontSmall) ImGui::PushFont(gFontSmall);
                 char vt[8]; snprintf(vt, sizeof vt, "%.0f", v * 100);
-                dl->AddText(ImVec2(o.x + 12, ly + lane - volH + 1), W(0.5f), vt);
+                dl->AddText(ImVec2(o.x + 12, ly + lane - volH - 1), W(0.5f), vt);
                 if (gFontSmall) ImGui::PopFont();
             }
             // auto-scale each ring to its own recent peak so every lane draws a full wave
