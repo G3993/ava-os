@@ -600,6 +600,24 @@ static void hzToNote(float hz, char* out, size_t n) {
     int cents = (int)std::lround((m - nn) * 100.0f);
     snprintf(out, n, "%s%d %+dc", kKeyNames[((nn % 12) + 12) % 12], nn / 12 - 1, cents);
 }
+// what a frequency feels like on the body, in words
+static const char* hzFeel(float hz) {
+    if (hz < 16) return "slow throb";
+    if (hz < 24) return "deep pulse";
+    if (hz < 34) return "rumble";
+    if (hz < 46) return "deep hum";
+    if (hz < 58) return "hum";
+    if (hz < 70) return "warm buzz";
+    return "buzz";
+}
+// the note, said simply: "near A0", "A0, a touch sharp"
+static void hzToNoteWords(float hz, char* out, size_t n) {
+    float m = 69.0f + 12.0f * std::log2(hz / 440.0f);
+    int nn = (int)std::lround(m);
+    int cents = (int)std::lround((m - nn) * 100.0f);
+    const char* how = cents > 25 ? ", sharp" : cents > 8 ? ", a touch sharp" : cents < -25 ? ", flat" : cents < -8 ? ", a touch flat" : "";
+    snprintf(out, n, "%s%s%d%s", std::abs(cents) <= 8 ? "" : "near ", kKeyNames[((nn % 12) + 12) % 12], nn / 12 - 1, how);
+}
 
 // ── system health monitor ──
 static bool gShowHealth = false;
@@ -1692,7 +1710,7 @@ static void drawTunerBody() {
     }
 
     // ── readouts, centred: five columns, each centred on its own axis ──
-    const float tableH = 118.0f;
+    const float tableH = 138.0f;
     t0.y += 8;
     auto centred = [&](const char* s, float cx, float y, ImU32 col) {
         ImVec2 ts = ImGui::CalcTextSize(s);
@@ -1721,18 +1739,21 @@ static void drawTunerBody() {
         dl->AddText(ImVec2(hx, t0.y + 16), W(hzFlash ? 1.0f : 0.92f), buf);
         if (gFontSmall) ImGui::PushFont(gFontSmall);
         dl->AddText(ImVec2(hx + hs.x + 6, t0.y + 20), W(0.35f), "Hz");
-        hzToNote(gTuneHz[z], buf, sizeof(buf));
-        centred(buf, cx, t0.y + 38, W(0.5f));
+        // in words: what it feels like, then the note said simply
+        centred(hzFeel(gTuneHz[z]), cx, t0.y + 38, W(0.62f));
+        hzToNoteWords(gTuneHz[z], buf, sizeof(buf));
+        centred(buf, cx, t0.y + 54, W(0.32f));
         if (gFontSmall) ImGui::PopFont();
 
         // DRONE toggle, centred
         ImGui::PushID(z);
         const float padX = ImGui::GetStyle().FramePadding.x * 2;
         float bw = ImGui::CalcTextSize("DRONE").x + padX;
-        ImGui::SetCursorScreenPos(ImVec2(cx - bw / 2, t0.y + 56));
+        ImGui::SetCursorScreenPos(ImVec2(cx - bw / 2, t0.y + 74));
         bool litD = gTuneDrone[z];
         if (litD) ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(1, 1, 1, 0.28f));
         if (ImGui::Button("DRONE")) setDrone(z, !gTuneDrone[z]);
+        if (ImGui::IsItemHovered()) ImGui::SetTooltip("hold this ring on its note until you let go");
         if (litD) ImGui::PopStyleColor();
 
         // CC cells under it: in LEARN mode they arm, otherwise they show the binding
@@ -1742,7 +1763,7 @@ static void drawTunerBody() {
             if (m.zone == z) (m.target == 0 ? ccHz : ccLv) = m.cc;
         if (gLearnArmed) {
             float bw2 = ImGui::CalcTextSize("HZ").x + ImGui::CalcTextSize("LVL").x + 2 * padX + 3;
-            ImGui::SetCursorScreenPos(ImVec2(cx - bw2 / 2, t0.y + 84));
+            ImGui::SetCursorScreenPos(ImVec2(cx - bw2 / 2, t0.y + 104));
             bool armHz = gLearnSel == z, armLv = gLearnSel == z + NZONES;
             if (armHz) ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(1, 1, 1, 0.3f));
             if (ImGui::SmallButton("HZ")) gLearnSel = z;
@@ -1753,8 +1774,9 @@ static void drawTunerBody() {
             if (armLv) ImGui::PopStyleColor();
         } else {
             bool lvFlash = now - gCcFlashT[z][1] < 0.15;
-            if (ccHz >= 0) { snprintf(buf, sizeof(buf), "CC%d", ccHz); centred(buf, cx, t0.y + 88, W(hzFlash ? 0.95f : 0.45f)); }
-            if (ccLv >= 0) { snprintf(buf, sizeof(buf), "L CC%d", ccLv); centred(buf, cx, t0.y + 101, W(lvFlash ? 0.95f : 0.45f)); }
+            // the controller knobs tied to this ring, in words
+            if (ccHz >= 0) { snprintf(buf, sizeof(buf), "pitch: knob %d", ccHz); centred(buf, cx, t0.y + 108, W(hzFlash ? 0.95f : 0.40f)); }
+            if (ccLv >= 0) { snprintf(buf, sizeof(buf), "level: knob %d", ccLv); centred(buf, cx, t0.y + 121, W(lvFlash ? 0.95f : 0.40f)); }
         }
         if (gFontSmall) ImGui::PopFont();
         ImGui::PopID();
