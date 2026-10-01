@@ -2405,7 +2405,8 @@ static void drawWaveBody(float w) {
             // (push/pop on a copy: the click flips the flag between them)
             bool litT = gScopeTrig;
             if (litT) ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(1, 1, 1, 0.28f));
-            if (ImGui::SmallButton("TRIG")) gScopeTrig = !gScopeTrig;
+            // full-height buttons so they sit on the sliders' row
+            if (ImGui::Button("TRIG", ImVec2(0, ImGui::GetFrameHeight()))) gScopeTrig = !gScopeTrig;
             if (litT) ImGui::PopStyleColor();
             if (ImGui::IsItemHovered()) ImGui::SetTooltip("triggered sweep: every refresh starts on a rising zero crossing,\nso a steady tone stands still instead of sliding");
             ImGui::SameLine(0, 6);
@@ -2426,7 +2427,7 @@ static void drawWaveBody(float w) {
             ImGui::SameLine(0, 6);
             bool litF = gScopeFreeze;
             if (litF) ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(1, 1, 1, 0.28f));
-            if (ImGui::SmallButton(gScopeFreeze ? "RUN" : "FREEZE")) gScopeFreeze = !gScopeFreeze;
+            if (ImGui::Button(gScopeFreeze ? "RUN" : "FREEZE", ImVec2(0, ImGui::GetFrameHeight()))) gScopeFreeze = !gScopeFreeze;
             if (litF) ImGui::PopStyleColor();
         }
         if (gFontSmall) ImGui::PopFont();
