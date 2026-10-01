@@ -3942,9 +3942,28 @@ int main(int argc, char** argv) {
         // ── octagon (left) ──
         float rightW = std::min(700.0f, W_ * 0.46f);
         float leftW = W_ - rightW;
-        ImVec2 octC(leftW * 0.5f, H_ * 0.47f);
-        float octR = std::min(leftW, H_) * 0.42f;
-        // (engine modes live in Artifact > Tune)
+        ImVec2 octC(leftW * 0.5f, H_ * 0.49f);
+        float octR = std::min(leftW, H_) * 0.39f;
+        // engine mode as buttons, centred above the octagon (the same row as
+        // Artifact > Tune, which also holds each mode's settings)
+        {
+            static const char* modes[5] = {"SYNTH", "SPLIT", "MONO", "STEREO", "SPATIAL"};
+            int em = gEngine.params.engineMode.load();
+            ImGui::PushStyleVar(ImGuiStyleVar_FramePadding, ImVec2(12, 6));
+            const float padX = 24, sp = 8;
+            float total = 0;
+            for (int m = 0; m < 5; m++) total += ImGui::CalcTextSize(modes[m]).x + padX + (m ? sp : 0);
+            float x = octC.x - total / 2, cy = octC.y - octR - 44;
+            for (int m = 0; m < 5; m++) {
+                ImGui::SetCursorScreenPos(ImVec2(x, cy));
+                bool on = em == m;
+                if (on) ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(1, 1, 1, 0.28f));
+                if (ImGui::Button(modes[m])) gEngine.params.engineMode.store(m);
+                if (on) ImGui::PopStyleColor();
+                x += ImGui::CalcTextSize(modes[m]).x + padX + sp;
+            }
+            ImGui::PopStyleVar();
+        }
 
         drawShaderOctagon(dl, octC, octR);   // the shader shows through the glass, masked to the body
         drawOctagon(dl, octC, octR);
