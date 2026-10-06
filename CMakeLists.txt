@@ -50,6 +50,7 @@ set(AVA_COMMON_SRC
   src/engine.cpp
   src/analysis.cpp
   src/stem_player.cpp
+  src/audio_in_common.cpp
   src/shaderhost.cpp)
 
 if(APPLE)
@@ -70,6 +71,7 @@ if(APPLE)
   target_compile_definitions(AVAOS PRIVATE GL_SILENCE_DEPRECATION)
   target_link_libraries(AVAOS PRIVATE imgui_lib
     "-framework CoreAudio"
+    "-framework AVFoundation"
     "-framework CoreMIDI"
     "-framework AudioToolbox"
     "-framework CoreFoundation"

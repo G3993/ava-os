@@ -15,6 +15,6 @@
   <key>NSAudioCaptureUsageDescription</key>
   <string>AVA OS listens to your system audio to generate live vibroacoustic zone channels for the SoundTemple.</string>
   <key>NSMicrophoneUsageDescription</key>
-  <string>AVA OS only taps system audio playback; the microphone is never recorded.</string>
+  <string>AVA OS listens to your audio interface or the Mac's microphone when live input is on, so you can feel and see what you play. Nothing is recorded.</string>
 </dict>
 </plist>

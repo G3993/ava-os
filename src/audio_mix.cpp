@@ -3,6 +3,7 @@
 // and per-channel meters. Backends only pull the tapped stereo, run the
 // engine, and hand the interleaved device buffer here.
 #include "audio_out.h"
+#include <vector>
 #include <algorithm>
 #include <cmath>
 #include <cstring>
@@ -15,7 +16,8 @@ void mixOutputBlock(OutputUnit* self, Engine* eng, const float* L, const float* 
     // listen mode the music is already coming out of the speakers untouched
     // (an authored stem set brings its own music track: that always plays)
     const bool takeOver = (self->tapMutesSource && eng->params.takeOver.load() != 0)
-                          || (self->player && self->player->active());
+                          || (self->player && self->player->active())
+                          || (self->bed && self->bed->running());
     // transport: paused = the bed is still, the music keeps playing
     const float vibG = eng->params.vibOn.load() ? 1.0f : 0.0f;
 
@@ -173,4 +175,99 @@ void mixOutputBlock(OutputUnit* self, Engine* eng, const float* L, const float* 
         }
     }
     captureMeters();
+}
+
+// ── the per-block render shared by the macOS (AUHAL) and Windows (WASAPI) backends ──
+void renderOutputBlock(OutputUnit* self, Engine* eng, float* dst, int n, int ch, int tapTarget) {
+    static thread_local std::vector<float> L, R, vib[NZONES];
+    L.resize(n); R.resize(n);
+    float* vibPtr[NZONES];
+    for (int z = 0; z < NZONES; z++) { vib[z].resize(n); vibPtr[z] = vib[z].data(); }
+
+    // Latency control: keep the tap→output queue tight. If more than
+    // target+2 blocks are waiting (output started late, clock drift),
+    // skip ahead to ~target so felt vibration stays in sync with heard sound.
+    {
+        StereoRing* ring = self->ring();
+        int target = tapTarget; // mac ≈ block + 2.7 ms (as tight as the tap allows); Windows + 512
+        int avail = ring->available();
+        if (avail > target + 2 * n) ring->discard(avail - target);
+    }
+    self->ring()->pop(L.data(), R.data(), n);
+    // what the speakers get: the tap alone unless the input is routed there
+    static thread_local std::vector<float> mL, mR;
+    mL.assign(L.begin(), L.begin() + n); mR.assign(R.begin(), R.begin() + n);
+    if (StereoRing* ir = self->inRing) {
+        // keep the live input tight too, then add it on top of the tap
+        int avail = ir->available();
+        if (avail > n + 128 + 2 * n) ir->discard(avail - (n + 128));
+        static thread_local std::vector<float> iL, iR;
+        iL.assign(n, 0.0f); iR.assign(n, 0.0f);
+        if (avail >= n) {
+            ir->pop(iL.data(), iR.data(), n);
+            bool hear = self->inToSpeakers.load();
+            for (int i = 0; i < n; i++) {
+                L[i] += iL[i]; R[i] += iR[i];
+                if (hear) { mL[i] += iL[i]; mR[i] += iR[i]; }
+            }
+        }
+    }
+    // authored content owns the bed: a live DAW feed first, else a stem set.
+    // Its music replaces the tap; zones it brings replace the engine's; zones
+    // it leaves out are filled by the live engine (hybrid sets).
+    {
+        const float* authored[NZONES] = {nullptr, nullptr, nullptr, nullptr, nullptr};
+        bool have = false;
+        static thread_local std::vector<float> bch[BedInput::kCh];
+        static thread_local std::vector<float> stem[NZONES];
+        if (BedInput* bi = self->bed; bi && bi->running()) {
+            float* bp[BedInput::kCh];
+            for (int c = 0; c < BedInput::kCh; c++) { bch[c].resize(n); bp[c] = bch[c].data(); }
+            int avail = bi->ring.available();
+            if (avail > n + 128 + 2 * n) bi->ring.discard(avail - (n + 128));
+            bi->ring.pop(bp, n);
+            for (int i = 0; i < n; i++) { mL[i] = bp[0][i]; mR[i] = bp[1][i]; }
+            for (int z = 0; z < NZONES; z++) if (bi->zoneFromDaw[z].load()) authored[z] = bp[2 + z];
+            have = true;
+        } else if (self->player && self->player->active()) {
+            float* stemPtr[NZONES];
+            for (int z = 0; z < NZONES; z++) { stem[z].resize(n); stemPtr[z] = stem[z].data(); }
+            if (self->player->render(mL.data(), mR.data(), stemPtr, n)) {
+                for (int z = 0; z < NZONES; z++) if (self->player->has[1 + z]) authored[z] = stemPtr[z];
+                have = true;
+            }
+        }
+        if (have) {
+            eng->process(mL.data(), mR.data(), vibPtr, n);   // analysis + visuals, and the engine zones
+            bool anyLive = false;
+            for (int z = 0; z < NZONES; z++) if (!authored[z]) anyLive = true;
+            const int look = eng->lookaheadSamples();
+            const bool align = anyLive && look > 0;
+            // the engine's zones run look-ahead late against the music it was
+            // given; with engine zones in play, hold the music and the authored
+            // zones back by the same amount so everything lands together
+            if (align) eng->delayMusic(mL.data(), mR.data(), mL.data(), mR.data(), n);
+            static thread_local std::vector<float> ab[NZONES];
+            float* outZ[NZONES];
+            const float* vibR[NZONES];
+            for (int z = 0; z < NZONES; z++) {
+                if (authored[z]) {
+                    ab[z].resize(n);
+                    if (align) for (int i = 0; i < n; i++) { self->bedDelay_[z].push(authored[z][i]); ab[z][i] = self->bedDelay_[z].tap(look); }
+                    else std::memcpy(ab[z].data(), authored[z], (size_t)n * sizeof(float));
+                    outZ[z] = ab[z].data(); vibR[z] = nullptr;
+                } else {
+                    outZ[z] = vibPtr[z]; vibR[z] = eng->rightOut(z);
+                }
+            }
+            mixOutputBlock(self, eng, mL.data(), mR.data(), outZ, vibR, dst, n, ch);
+            return;
+        }
+    }
+    eng->process(L.data(), R.data(), vibPtr, n);
+    // speakers get the music held back by the sync look-ahead, in step with the felt output
+    eng->delayMusic(mL.data(), mR.data(), mL.data(), mR.data(), n);
+    const float* vibR[NZONES];
+    for (int z = 0; z < NZONES; z++) vibR[z] = eng->rightOut(z);
+    mixOutputBlock(self, eng, mL.data(), mR.data(), vibPtr, vibR, dst, n, ch);
 }

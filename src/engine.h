@@ -41,7 +41,7 @@ struct Params {
     //     side like STEREO, the voice sits up top (HEAD+HEART), bass line +
     //     drums low (BELLY+ROOT), the sub in the FEET (+10 dB, bass-managed).
     //     On a clear bass drop a head-to-toe roll fires — the only effect.
-    std::atomic<int>   engineMode{2};
+    std::atomic<int>   engineMode{4};        // SPATIAL by default (2026-10-04, was MONO)
     std::atomic<int>   stereoCenter{0};      // STEREO: the centre pad follows 0 = left, 1 = right
     // SYNC look-ahead. The analysis hears the music the moment it arrives;
     // the vibration synth — and the speakers — hear it this much later. Every
@@ -105,6 +105,14 @@ struct Params {
     // isolate one ring at the interface send: every other zone's output is
     // silenced (music/surround sends untouched); <0 = no solo
     std::atomic<int>   soloZone{-1};
+    // layer effects: a small per-zone chain at the end of the vibration path,
+    // untouched by presets, so a layer can be singled out to always behave a
+    // certain way. tone = low-pass over the layer (1 = open, 0 = ~15 Hz),
+    // drive = soft saturation (0 = clean), pulse = tremolo depth at the
+    // session's entrainment rate (0 = steady).
+    std::atomic<float> zoneTone[NZONES]{{1.f}, {1.f}, {1.f}, {1.f}, {1.f}};
+    std::atomic<float> zoneDrive[NZONES]{{0.f}, {0.f}, {0.f}, {0.f}, {0.f}};
+    std::atomic<float> zonePulse[NZONES]{{0.f}, {0.f}, {0.f}, {0.f}, {0.f}};
     // transducer thermal guard: cap the ~45 s running RMS leaving each zone
     // channel (0..1 full scale; 0 = off). Voice coils heat with average
     // power, not peaks, so a long hold/drone gets eased down while hits pass.
@@ -207,6 +215,23 @@ static const Preset kPresets[] = {
     // HEAL — classic vibroacoustic protocol: 40 Hz on every zone (the most
     // studied VAT frequency), gently pulsed at ~0.125 Hz, delta band, slow
     {"Heal",     0.55f, 0.8f, 0.2f, DELTA, 0.10f, 0.15f, 0.5f, -1, -1, 0.125f, 0.40f, 3},
+    // BREATHE — guided breathing: the pacer is the whole point, deep enough
+    // that the body clearly follows the swell (6 breaths/min), theta, mid
+    // intensity, nothing else moving
+    {"Breathe",  0.60f, 0.7f, 0.3f, THETA, 0.10f, 0.20f, 0.5f, -1, -1, 0.10f, 0.80f, 4},
+};
+// one line per preset: what the machine is doing, for the strip's caption
+static const char* kPresetCaption[] = {
+    "delta  ·  slow and low  ·  rest",
+    "theta  ·  balanced  ·  still",
+    "alpha  ·  lifted  ·  clear",
+    "beta  ·  lifted, moving",
+    "gamma  ·  bright, full  ·  peak",
+    "theta  ·  heavy low end  ·  grounded",
+    "alpha  ·  heart and belly forward",
+    "theta  ·  breathe at 6/min  ·  low and grounded",
+    "40 Hz on every zone  ·  slow pulse  ·  delta",
+    "theta  ·  deep breath swell at 6/min  ·  follow it",
 };
 static const int kNumPresets = sizeof(kPresets) / sizeof(kPresets[0]);
 
@@ -245,6 +270,13 @@ public:
     std::atomic<int> vecW{0};
     float vibScope[NZONES][kScopeLen] = {{0}}; // per-zone output traces
     std::atomic<int> scopeW{0};
+    // ease: how each zone's vibration swells in and backs off over time —
+    // its RMS level every 50 ms, ~13 s of history (breath, swells, voids,
+    // the warm-up fade all read at this scale; the scope is too fast to)
+    static constexpr int kEaseLen = 256;
+    static constexpr int kEaseHop = 2400;          // 50 ms @ 48 k
+    float easeHist[NZONES][kEaseLen] = {{0}};
+    std::atomic<int> easeW{0};
 
 private:
     // envelopes
@@ -268,6 +300,15 @@ private:
     dsp::ButterLP zoneLP_[NZONES];
     dsp::Biquad zoneHP_[NZONES];
     float zonePeak_[NZONES] = {1e-3f, 1e-3f, 1e-3f, 1e-3f, 1e-3f};
+    // layer effects state
+    dsp::Biquad zoneToneLP_[NZONES], zoneToneLPR_[NZONES];
+    float zoneToneFc_[NZONES] = {0, 0, 0, 0, 0};
+    float layerPulsePh_ = 0;
+    // ease accumulators: 50 ms RMS, then smoothed (~400 ms) so the line is
+    // the swell, not the beat
+    float easeAcc_[NZONES] = {0};
+    float easeSm_[NZONES] = {0};
+    int easeCnt_ = 0;
 
     // breath / macro-dynamics
     float loudSq_ = 0;        // ~300 ms mean-square loudness

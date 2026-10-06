@@ -53,6 +53,8 @@ void Engine::init() {
     for (int z = 0; z < NZONES; z++) {
         zoneLP_[z].design(zoneHzMax(z), kSR, 6);
         zoneHP_[z].highpass(zoneHzMin(z), kSR);
+        zoneToneLP_[z].lowpass(200.0f, kSR); zoneToneLPR_[z].lowpass(200.0f, kSR);
+        zoneToneFc_[z] = 200.0f;
     }
 
     // SPLIT mode: real low bands pass straight to the body; the layers that
@@ -165,6 +167,24 @@ void Engine::process(const float* inL, const float* inR, float** out, int n) {
         if (padGateS[z] && !padPrevGate_[z]) padT_[z] = 0; // new strike
         padPrevGate_[z] = padGateS[z];
     }
+
+    // layer effects: snapshot per block; the tone filter is redesigned only
+    // when its cutoff has moved (15 Hz .. 200 Hz, log)
+    float layerDrive[NZONES], layerPulse[NZONES];
+    bool layerTone[NZONES];
+    for (int z = 0; z < NZONES; z++) {
+        float t = std::min(1.0f, std::max(0.0f, params.zoneTone[z].load()));
+        float fc = 15.0f * std::pow(200.0f / 15.0f, t);
+        layerTone[z] = t < 0.995f;
+        if (std::fabs(fc - zoneToneFc_[z]) > 0.5f) {
+            zoneToneLP_[z].lowpass(fc, kSR); zoneToneLPR_[z].lowpass(fc, kSR);
+            zoneToneFc_[z] = fc;
+        }
+        layerDrive[z] = std::min(1.0f, std::max(0.0f, params.zoneDrive[z].load()));
+        layerPulse[z] = std::min(1.0f, std::max(0.0f, params.zonePulse[z].load()));
+    }
+    const float layerPulseInc = dsp::kTwoPi * entHz / kSR;
+    const float driveNorm = 1.0f / std::tanh(1.8f);
 
     // no sound at open: hold silent 0.6 s while followers settle, fade in 0.9 s
     const long warmHold = (long)(0.6f * kSR);
@@ -734,11 +754,37 @@ void Engine::process(const float* inL, const float* inR, float** out, int n) {
                 }
             }
             o *= fxG_ * tremG;
+            if (stereoMode) oR *= fxG_ * tremG;
+            // layer effects (per zone, preset-independent): tone → drive → pulse
+            if (layerTone[z]) { o = zoneToneLP_[z].process(o); if (stereoMode) oR = zoneToneLPR_[z].process(oR); }
+            if (layerDrive[z] > 0.001f) {
+                float d = layerDrive[z];
+                o += d * (std::tanh(1.8f * o) * driveNorm - o);
+                if (stereoMode) oR += d * (std::tanh(1.8f * oR) * driveNorm - oR);
+            }
+            if (layerPulse[z] > 0.001f) {
+                float pg = 1.0f - layerPulse[z] * (0.5f - 0.5f * std::cos(layerPulsePh_));
+                o *= pg; if (stereoMode) oR *= pg;
+            }
             o = std::max(-1.0f, std::min(1.0f, o));
             out[z][i] = o;
-            if (stereoMode) { oR *= fxG_ * tremG; vibR_[z][i] = std::max(-1.0f, std::min(1.0f, oR)); }
+            if (stereoMode) vibR_[z][i] = std::max(-1.0f, std::min(1.0f, oR));
             if (doScope) vibScope[z][scopeIdx] = o;
             peakAcc[z + 2] = std::max(peakAcc[z + 2], std::fabs(o));
+            easeAcc_[z] += o * o;
+        }
+        layerPulsePh_ += layerPulseInc;
+        if (layerPulsePh_ > dsp::kTwoPi) layerPulsePh_ -= dsp::kTwoPi;
+        if (++easeCnt_ >= kEaseHop) {
+            int ew = easeW.load(std::memory_order_relaxed);
+            for (int z = 0; z < NZONES; z++) {
+                float rms = std::sqrt(easeAcc_[z] / kEaseHop);
+                easeSm_[z] += (rms - easeSm_[z]) * 0.12f;
+                easeHist[z][ew] = easeSm_[z];
+                easeAcc_[z] = 0;
+            }
+            easeW.store((ew + 1) % kEaseLen, std::memory_order_relaxed);
+            easeCnt_ = 0;
         }
         peakAcc[0] = std::max(peakAcc[0], std::fabs(L));
         peakAcc[1] = std::max(peakAcc[1], std::fabs(R));

@@ -73,63 +73,9 @@ static OSStatus renderCB(void* inRefCon, AudioUnitRenderActionFlags*,
                          const AudioTimeStamp*, UInt32, UInt32 inNumberFrames,
                          AudioBufferList* ioData) {
     auto* self = (OutputUnit*)inRefCon;
-    Engine* eng = self->engine();
-    int n = (int)inNumberFrames;
-
-    static thread_local std::vector<float> L, R, vib[NZONES];
-    L.resize(n); R.resize(n);
-    float* vibPtr[NZONES];
-    for (int z = 0; z < NZONES; z++) { vib[z].resize(n); vibPtr[z] = vib[z].data(); }
-
-    // Latency control: keep the tap→output queue tight. If more than
-    // target+2 blocks are waiting (output started late, clock drift),
-    // skip ahead to ~target so felt vibration stays in sync with heard sound.
-    {
-        StereoRing* ring = self->ring();
-        int target = n + 128; // ≈ block + ~2.7 ms: as tight as the tap allows
-        int avail = ring->available();
-        if (avail > target + 2 * n) ring->discard(avail - target);
-    }
-    self->ring()->pop(L.data(), R.data(), n);
-    // what the speakers get: the tap alone unless the input is routed there
-    static thread_local std::vector<float> mL, mR;
-    mL.assign(L.begin(), L.begin() + n); mR.assign(R.begin(), R.begin() + n);
-    if (StereoRing* ir = self->inRing) {
-        // keep the live input tight too, then add it on top of the tap
-        int avail = ir->available();
-        if (avail > n + 128 + 2 * n) ir->discard(avail - (n + 128));
-        static thread_local std::vector<float> iL, iR;
-        iL.assign(n, 0.0f); iR.assign(n, 0.0f);
-        if (avail >= n) {
-            ir->pop(iL.data(), iR.data(), n);
-            bool hear = self->inToSpeakers.load();
-            for (int i = 0; i < n; i++) {
-                L[i] += iL[i]; R[i] += iR[i];
-                if (hear) { mL[i] += iL[i]; mR[i] += iR[i]; }
-            }
-        }
-    }
     AudioBuffer& b = ioData->mBuffers[0];
-    // an active stem player owns the output: its music pair and its five zone
-    // stems, already aligned by the author — no look-ahead, no engine vibration
-    if (self->player && self->player->active()) {
-        static thread_local std::vector<float> stem[NZONES];
-        float* stemPtr[NZONES];
-        for (int z = 0; z < NZONES; z++) { stem[z].resize(n); stemPtr[z] = stem[z].data(); }
-        if (self->player->render(mL.data(), mR.data(), stemPtr, n)) {
-            eng->process(mL.data(), mR.data(), vibPtr, n);   // analysis + visuals only
-            mixOutputBlock(self, eng, mL.data(), mR.data(), stemPtr, nullptr, (float*)b.mData, n,
-                           (int)b.mNumberChannels);
-            return noErr;
-        }
-    }
-    eng->process(L.data(), R.data(), vibPtr, n);
-    // speakers get the music held back by the sync look-ahead, in step with the felt output
-    eng->delayMusic(mL.data(), mR.data(), mL.data(), mR.data(), n);
-    const float* vibR[NZONES];
-    for (int z = 0; z < NZONES; z++) vibR[z] = eng->rightOut(z);
-    mixOutputBlock(self, eng, mL.data(), mR.data(), vibPtr, vibR, (float*)b.mData, n,
-                   (int)b.mNumberChannels);
+    renderOutputBlock(self, self->engine(), (float*)b.mData, (int)inNumberFrames, (int)b.mNumberChannels,
+                      (int)inNumberFrames + 128);
     return noErr;
 }
 
@@ -179,6 +125,7 @@ bool OutputUnit::start(unsigned deviceID, Engine* engine, StereoRing* ring) {
     engine_ = engine;
     ring_ = ring;
     lastError.clear();
+    for (int z = 0; z < NZONES; z++) bedDelay_[z].init(16384);   // > 300 ms of alignment
     for (int c = 0; c < kMaxCh; c++) { chanPeak[c].store(0.0f); chanHeat[c].store(0.0f); chanThermGain[c].store(1.0f); heatMs_[c] = 0; thermG_[c] = 1.0f; }
 
     AudioComponentDescription desc = {kAudioUnitType_Output, kAudioUnitSubType_HALOutput,

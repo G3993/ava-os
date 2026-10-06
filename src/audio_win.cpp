@@ -18,6 +18,7 @@
 #include <cstring>
 #include "capture_tap.h"
 #include "audio_out.h"
+#include "audio_in.h"
 
 // ── shared context + device cache ──
 static ma_context gCtx;
@@ -121,46 +122,16 @@ void SystemTap::stop() {
 // ── output (WASAPI render, mirrors the macOS AUHAL renderCB) ──
 static void outDataCB(ma_device* dev, void* output, const void*, ma_uint32 frames) {
     auto* self = (OutputUnit*)dev->pUserData;
-    Engine* eng = self->engine();
-    int n = (int)frames;
-
-    static thread_local std::vector<float> L, R, vib[NZONES];
-    L.resize(n); R.resize(n);
-    float* vibPtr[NZONES];
-    for (int z = 0; z < NZONES; z++) { vib[z].resize(n); vibPtr[z] = vib[z].data(); }
-
-    // latency control: keep the tap→output queue tight (see audio_out.cpp)
-    {
-        StereoRing* ring = self->ring();
-        int target = n + 512;
-        int avail = ring->available();
-        if (avail > target + 2 * n) ring->discard(avail - target);
-    }
-    self->ring()->pop(L.data(), R.data(), n);
-    if (self->player && self->player->active()) {
-        static thread_local std::vector<float> stem[NZONES];
-        float* stemPtr[NZONES];
-        for (int z = 0; z < NZONES; z++) { stem[z].resize(n); stemPtr[z] = stem[z].data(); }
-        if (self->player->render(L.data(), R.data(), stemPtr, n)) {
-            eng->process(L.data(), R.data(), vibPtr, n);
-            mixOutputBlock(self, eng, L.data(), R.data(), stemPtr, nullptr, (float*)output, n,
-                           (int)dev->playback.channels);
-            return;
-        }
-    }
-    eng->process(L.data(), R.data(), vibPtr, n);
-    eng->delayMusic(L.data(), R.data(), L.data(), R.data(), n);
-    const float* vibR[NZONES];
-    for (int z = 0; z < NZONES; z++) vibR[z] = eng->rightOut(z);
-
-    mixOutputBlock(self, eng, L.data(), R.data(), vibPtr, vibR, (float*)output, n,
-                   (int)dev->playback.channels);
+    // WASAPI blocks are coarser than CoreAudio's, so the tap queue is kept
+    // 512 frames deep instead of 128
+    renderOutputBlock(self, self->engine(), (float*)output, (int)frames, (int)dev->playback.channels, (int)frames + 512);
 }
 
 bool OutputUnit::start(unsigned deviceID, Engine* engine, StereoRing* ring) {
     stop();
     engine_ = engine;
     ring_ = ring;
+    for (int z = 0; z < NZONES; z++) bedDelay_[z].init(16384);
     lastError.clear();
     if (!ensureContext()) { lastError = "audio context init failed"; return false; }
 
@@ -204,6 +175,152 @@ void OutputUnit::stop() {
         unit_ = nullptr;
     }
     running_.store(false);
+}
+
+// ── live input + live set (capture devices via miniaudio/WASAPI) ──
+// Input device ids are 1000 + the capture-list index, so they never collide
+// with the playback indices listOutputDevices() hands out.
+static std::vector<ma_device_id> gInDevIds;
+static const unsigned kInIdBase = 1000;
+
+std::vector<OutDevice> listInputDevices() {
+    std::vector<OutDevice> out;
+    if (!ensureContext()) return out;
+    ma_device_info* pb = nullptr; ma_uint32 npb = 0;
+    ma_device_info* cap = nullptr; ma_uint32 ncap = 0;
+    if (ma_context_get_devices(&gCtx, &pb, &npb, &cap, &ncap) != MA_SUCCESS) return out;
+    gInDevIds.clear();
+    for (ma_uint32 i = 0; i < ncap; i++) {
+        ma_device_info full = cap[i];
+        ma_context_get_device_info(&gCtx, ma_device_type_capture, &cap[i].id, &full);
+        int ch = 0; double rate = 48000;
+        for (ma_uint32 f = 0; f < full.nativeDataFormatCount; f++) {
+            ch = std::max(ch, (int)full.nativeDataFormats[f].channels);
+            if (full.nativeDataFormats[f].sampleRate > 0) rate = full.nativeDataFormats[f].sampleRate;
+        }
+        if (ch == 0) ch = 2;
+        gInDevIds.push_back(cap[i].id);
+        out.push_back({kInIdBase + i, full.name, ch, rate});
+    }
+    return out;
+}
+
+unsigned defaultInputDevice() {
+    if (!ensureContext()) return 0;
+    ma_device_info* pb = nullptr; ma_uint32 npb = 0;
+    ma_device_info* cap = nullptr; ma_uint32 ncap = 0;
+    if (ma_context_get_devices(&gCtx, &pb, &npb, &cap, &ncap) != MA_SUCCESS || ncap == 0) return 0;
+    for (ma_uint32 i = 0; i < ncap; i++) if (cap[i].isDefault) return kInIdBase + i;
+    return kInIdBase;
+}
+
+// Windows has no per-app microphone prompt the way macOS does: the privacy
+// switch lives in Settings and a blocked mic simply captures silence.
+int micAuthStatus() { return 2; }
+void micRequestAccess() {}
+
+static bool inputIndex(unsigned deviceID, size_t& idx) {
+    if (deviceID < kInIdBase) return false;
+    idx = deviceID - kInIdBase;
+    return idx < gInDevIds.size();
+}
+
+static void inDataCB(ma_device* dev, void*, const void* input, ma_uint32 frames) {
+    auto* self = (InputUnit*)dev->pUserData;
+    self->cbCount.fetch_add(1, std::memory_order_relaxed);
+    if (!input || frames == 0) return;
+    self->processBlock((const float*)input, self->deviceChannels, (int)frames);
+}
+
+bool InputUnit::start(unsigned deviceID, StereoRing* ring) {
+    stop();
+    ring_ = ring;
+    lastError.clear();
+    if (!ensureContext()) { lastError = "audio context init failed"; return false; }
+    auto ins = listInputDevices();   // refreshes gInDevIds
+    size_t idx;
+    if (!inputIndex(deviceID, idx)) { lastError = "no such input device"; return false; }
+    deviceChannels = std::min(32, std::max(1, ins[idx].channels));
+    hwRate = ins[idx].sampleRate;
+    cbCount.store(0); lastErr.store(0);
+    ma_device_config cfg = ma_device_config_init(ma_device_type_capture);
+    cfg.capture.pDeviceID = &gInDevIds[idx];
+    cfg.capture.format = ma_format_f32;
+    cfg.capture.channels = (ma_uint32)deviceChannels;
+    cfg.sampleRate = 48000;           // miniaudio resamples if the device differs
+    cfg.periodSizeInFrames = 128;
+    cfg.dataCallback = inDataCB;
+    cfg.pUserData = this;
+    auto* dev = new ma_device;
+    if (ma_device_init(&gCtx, &cfg, dev) != MA_SUCCESS) { delete dev; lastError = "input device init failed"; return false; }
+    if (ma_device_start(dev) != MA_SUCCESS) { ma_device_uninit(dev); delete dev; lastError = "input start failed"; return false; }
+    unit_ = dev;
+    running_.store(true);
+    return true;
+}
+
+void InputUnit::stop() {
+    if (!unit_) return;
+    auto* dev = (ma_device*)unit_;
+    ma_device_uninit(dev);
+    delete dev;
+    unit_ = nullptr;
+    running_.store(false);
+    peak.store(0);
+}
+
+static void bedDataCB(ma_device* dev, void*, const void* input, ma_uint32 frames) {
+    auto* self = (BedInput*)dev->pUserData;
+    if (!input || frames == 0) return;
+    const float* src = (const float*)input;
+    int ch = self->deviceChannels;
+    int first = std::min(std::max(self->firstChan.load(), 0), std::max(0, ch - 1));
+    self->ring.pushInterleaved(src, (int)frames, ch, first);
+    for (int c = 0; c < BedInput::kCh; c++) {
+        int sc = first + c;
+        float pk = 0;
+        if (sc < ch) for (ma_uint32 i = 0; i < frames; i++) pk = std::max(pk, std::fabs(src[i * ch + sc]));
+        float prev = self->peak[c].load(std::memory_order_relaxed) * 0.9f;
+        self->peak[c].store(pk > prev ? pk : prev, std::memory_order_relaxed);
+    }
+}
+
+bool BedInput::start(unsigned devID) {
+    stop();
+    lastError.clear();
+    deviceID = devID;
+    if (!ensureContext()) { lastError = "audio context init failed"; return false; }
+    auto ins = listInputDevices();
+    size_t idx;
+    if (!inputIndex(devID, idx)) { lastError = "no such input device"; return false; }
+    deviceChannels = std::min(32, std::max(1, ins[idx].channels));
+    if (deviceChannels < 2) { lastError = "device has fewer than 2 inputs"; return false; }
+    ring.init(48000, kCh);
+    for (int c = 0; c < kCh; c++) peak[c].store(0.0f);
+    ma_device_config cfg = ma_device_config_init(ma_device_type_capture);
+    cfg.capture.pDeviceID = &gInDevIds[idx];
+    cfg.capture.format = ma_format_f32;
+    cfg.capture.channels = (ma_uint32)deviceChannels;
+    cfg.sampleRate = 48000;
+    cfg.periodSizeInFrames = 128;
+    cfg.dataCallback = bedDataCB;
+    cfg.pUserData = this;
+    auto* dev = new ma_device;
+    if (ma_device_init(&gCtx, &cfg, dev) != MA_SUCCESS) { delete dev; lastError = "input device init failed"; return false; }
+    if (ma_device_start(dev) != MA_SUCCESS) { ma_device_uninit(dev); delete dev; lastError = "input start failed"; return false; }
+    unit_ = dev;
+    setRunning(true);
+    return true;
+}
+
+void BedInput::stop() {
+    if (!unit_) return;
+    setRunning(false);
+    auto* dev = (ma_device*)unit_;
+    ma_device_uninit(dev);
+    delete dev;
+    unit_ = nullptr;
+    for (int c = 0; c < kCh; c++) peak[c].store(0.0f);
 }
 
 #endif // !__APPLE__

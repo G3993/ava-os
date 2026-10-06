@@ -24,9 +24,7 @@
 #include "audio_out.h"
 #include "stem_player.h"
 #include "file_dialog.h"
-#ifdef __APPLE__
 #include "audio_in.h"
-#endif
 #ifdef __APPLE__
 #include <CoreAudio/CoreAudio.h>
 #endif
@@ -57,17 +55,17 @@ static SystemTap gTap;
 static OutputUnit gOut;
 static StereoRing gRing;
 static StemPlayer gPlayer;      // authored multichannel sets (stems) played straight to the bed
+static BedInput gBed;           // live set from a DAW over a multichannel device
+static std::string gBedMsg;
 static std::string gPlayerMsg;  // last load result for the Play tab
-#ifdef __APPLE__
 static StereoRing gInRing;   // live input from the interface (guitar, mic…)
 static InputUnit gIn;
 static bool gInOn = true;   // on by default: input 1 (the guitar jack) feeds the engine
-#endif
 static std::vector<OutDevice> gDevices;
 static int gSelDevice = -1;
 static int gActiveTab = 0;
 static int gMode = 0;        // right card: 0 Audio · 1 Visual · 2 Artifact
-static int gArtifactTab = 0; // Artifact: 0 Tune · 1 Sounds · 3 Play (stems, parked)
+static int gArtifactTab = 0; // Artifact: 0 Tune · 1 Sounds · 2 Play (stem sets + live DAW)
 static float gZoneSlider[NZONES] = {0.65f, 0.6f, 0.8f, 0.75f, 0.75f};
 static float gEdgeFade = 0.0f; // vignette on the shader/projector output
 static float gMasterVol = 1.0f;
@@ -110,8 +108,12 @@ static void insetConvexPoly(const ImVec2* p, int n, float g, ImVec2* out) {
 }
 
 static const char* kZoneNames[NZONES] = {"HEAD", "HEART", "BELLY", "BUTT", "FEET"};
-static const char* kTabNames[5] = {"Calm", "Heal", "Breath", "Energy", "Creative"};
-static const int kTabPreset[5] = {7, 8, 1, 3, 4}; // Calm, Heal, Meditate, Energize, Peak
+// the strip: five invitations, each one a preset; every other preset lives
+// behind the chevron at the strip's right end
+static const char* kTabNames[5] = {"Settle", "Heal", "Breathe", "Energize", "Create"};
+static const int kTabPreset[5] = {7, 8, 9, 3, 4}; // Calm, Heal, Breathe, Energize, Peak
+static_assert(sizeof(kPresetCaption) / sizeof(kPresetCaption[0]) == kNumPresets, "one caption per preset");
+static int gActivePreset = 7;                     // index into kPresets (the strip or the menu)
 static const char* kKeyNames[12] = {"C","C#","D","D#","E","F","F#","G","G#","A","A#","B"};
 
 static ImU32 W(float a) { return IM_COL32(255, 255, 255, (int)(a * 255)); }
@@ -119,6 +121,7 @@ static ImU32 W(float a) { return IM_COL32(255, 255, 255, (int)(a * 255)); }
 static void applyPresetTuning(int t);   // defined after the tunings table
 static void applyPreset(int p) {
     const Preset& pr = kPresets[p];
+    gActivePreset = p;
     gEngine.params.intensity.store(pr.intensity);
     gEngine.params.grounding.store(pr.grounding);
     gEngine.params.uplift.store(pr.uplift);
@@ -218,22 +221,61 @@ static void startTapAsync() {
 static std::atomic<bool> gQuit{false};
 static void onQuitSignal(int) { gQuit.store(true); }
 
-#ifdef __APPLE__
 
-// live input follows the engine's device: on = capture that interface's inputs
+// live input device: 0 = automatic — the engine's own interface when it has
+// inputs, else the Mac's default input (the built-in mic), so there is
+// always a signal to see; any other value = that input device's id
+static unsigned gInDevId = 0;
+static std::string gInDevName;
+static unsigned resolveInputDevice(std::string* nameOut) {
+    auto ins = listInputDevices();
+    auto nameOf = [&](unsigned id) -> std::string {
+        for (auto& d : ins) if (d.id == id) return d.name;
+        return "";
+    };
+    if (gInDevId) {
+        std::string n = nameOf(gInDevId);
+        if (!n.empty()) { if (nameOut) *nameOut = n; return gInDevId; }
+        gInDevId = 0;   // it went away: back to automatic
+    }
+    if (gSelDevice >= 0 && gSelDevice < (int)gDevices.size()) {
+        std::string n = nameOf(gDevices[gSelDevice].id);
+        if (!n.empty()) { if (nameOut) *nameOut = n; return gDevices[gSelDevice].id; }
+#ifndef __APPLE__
+        // Windows lists an interface as separate render / capture endpoints
+        // ("Speakers (Fireface)", "Analog 1+2 (Fireface)"): match on the
+        // "(Device)" tail so the interface's own inputs are still automatic
+        const std::string& on = gDevices[gSelDevice].name;
+        size_t par = on.rfind('(');
+        if (par != std::string::npos && par + 3 < on.size()) {
+            std::string tag = on.substr(par);
+            for (auto& d : ins) if (d.name.find(tag) != std::string::npos) { if (nameOut) *nameOut = d.name; return d.id; }
+        }
+#endif
+    }
+    unsigned def = defaultInputDevice();
+    if (def) { if (nameOut) *nameOut = nameOf(def); return def; }
+    if (!ins.empty()) { if (nameOut) *nameOut = ins[0].name; return ins[0].id; }
+    return 0;
+}
 static void setInput(bool on) {
     gInOn = on;
     gIn.stop();
     gOut.inRing = nullptr;
-    if (!on || gSelDevice < 0 || gSelDevice >= (int)gDevices.size()) return;
+    gInDevName.clear();
+    if (!on) return;
+    unsigned dev = resolveInputDevice(&gInDevName);
+    if (!dev) { gIn.lastError = "no input device"; fprintf(stderr, "[input] no input device\n"); return; }
     gInRing.init(48000);
-    if (gIn.start(gDevices[gSelDevice].id, &gInRing)) {
+    int auth = micAuthStatus();
+    fprintf(stderr, "[input] microphone permission: %s\n", auth == 2 ? "allowed" : auth == 0 ? "not asked yet" : "DENIED");
+    if (auth == 0) micRequestAccess();
+    if (gIn.start(dev, &gInRing)) {
         gOut.inRing = &gInRing;
         fprintf(stderr, "[input] live input on %s: %d inputs, using %d/%d\n",
-                gDevices[gSelDevice].name.c_str(), gIn.deviceChannels, gIn.chanL.load() + 1, gIn.chanR.load() + 1);
-    } else fprintf(stderr, "[input] %s\n", gIn.lastError.c_str());
+                gInDevName.c_str(), gIn.deviceChannels, gIn.chanL.load() + 1, gIn.chanR.load() + 1);
+    } else fprintf(stderr, "[input] %s (%s)\n", gIn.lastError.c_str(), gInDevName.c_str());
 }
-#endif
 // Listen (default) vs take over. Take over is the temple setup: the music
 // goes out through AVA's own music channels on the interface, in step with
 // the bed. Everyone else just listens: nothing about their sound changes.
@@ -287,9 +329,7 @@ static void startAudio() {
     if (!gTap.running()) startTapAsync();
     if (!gOut.running() && gSelDevice >= 0 && gSelDevice < (int)gDevices.size())
         gOut.start(gDevices[gSelDevice].id, &gEngine, &gRing);
-#ifdef __APPLE__
     if (gInOn) setInput(true);   // follow the device
-#endif
     gPlaying = gOut.running();
 }
 static void stopAudio() {
@@ -2044,6 +2084,34 @@ static std::string appSupportFile(const char* name) {
     return dir + "/" + name;
 #endif
 }
+// layer effects live outside the presets: saved the moment they move so a
+// layer singled out tonight is still singled out tomorrow
+static bool gLaneFx[NZONES] = {false, false, false, false, false};   // row open
+static void saveLayerFx() {
+    if (FILE* f = fopen(appSupportFile("layers.txt").c_str(), "w")) {
+        for (int z = 0; z < NZONES; z++)
+            fprintf(f, "%d %.3f %.3f %.3f\n", z, gEngine.params.zoneTone[z].load(),
+                    gEngine.params.zoneDrive[z].load(), gEngine.params.zonePulse[z].load());
+        fclose(f);
+    }
+}
+static void loadLayerFx() {
+    FILE* f = fopen(appSupportFile("layers.txt").c_str(), "r");
+    if (!f) return;
+    int z; float t, d, p;
+    while (fscanf(f, "%d %f %f %f", &z, &t, &d, &p) == 4) {
+        if (z < 0 || z >= NZONES) continue;
+        gEngine.params.zoneTone[z].store(std::min(1.0f, std::max(0.0f, t)));
+        gEngine.params.zoneDrive[z].store(std::min(1.0f, std::max(0.0f, d)));
+        gEngine.params.zonePulse[z].store(std::min(1.0f, std::max(0.0f, p)));
+    }
+    fclose(f);
+}
+static bool layerFxActive(int z) {
+    return gEngine.params.zoneTone[z].load() < 0.995f || gEngine.params.zoneDrive[z].load() > 0.001f ||
+           gEngine.params.zonePulse[z].load() > 0.001f;
+}
+
 static void loadDeletedShaders() {
     gDeletedShaders.clear();
     if (FILE* f = fopen(appSupportFile("deleted_shaders.txt").c_str(), "r")) {
@@ -2408,9 +2476,13 @@ static void drawWaveBody(float w, bool audio = false) {
         float roomH = ImGui::GetWindowPos().y + ImGui::GetWindowSize().y - top - 16;
         const float lane = audio ? 92.0f : std::max(44.0f, std::min(110.0f, (roomH - 4 * laneGap) / NZONES));
         const float volH = audio ? 32.0f : 0.0f;              // the volume strip under the wave, with room above and beneath
+        const float fxH = audio ? 30.0f : 0.0f;              // the layer-effects row, when a lane is opened
+        float ly = top;
         for (int z = 0; z < NZONES; z++) {
-            float ly = top + z * (lane + laneGap), mid = ly + (lane - volH) / 2 + 1, amp = (lane - volH) * 0.42f;
-            dl->AddRectFilled(ImVec2(o.x, ly), ImVec2(o.x + w, ly + lane), IM_COL32(8, 8, 9, 255), 10);
+            const bool fxOpen = audio && gLaneFx[z];
+            const float laneH = lane + (fxOpen ? fxH : 0);
+            float mid = ly + (lane - volH) / 2 + 1, amp = (lane - volH) * 0.42f;
+            dl->AddRectFilled(ImVec2(o.x, ly), ImVec2(o.x + w, ly + laneH), IM_COL32(8, 8, 9, 255), 10);
             if (audio) {
                 dl->AddRectFilled(ImVec2(o.x + 68, ly + 4), ImVec2(o.x + w - 8, ly + lane - volH - 2), IM_COL32(4, 4, 5, 255), 6);
                 dl->AddLine(ImVec2(o.x + 72, mid), ImVec2(o.x + w - 12, mid), W(0.06f), 1.0f);
@@ -2449,6 +2521,33 @@ static void drawWaveBody(float w, bool audio = false) {
                 dl->AddText(ImVec2(o.x + 12, ly + lane - 13), W(0.32f), "S");
                 if (gFontSmall) ImGui::PopFont();
             }
+            // ease: the zone's level over the last ~13 s, a slow blue line under
+            // the wave — how the vibration swells in and backs off (breath,
+            // swells, voids, the warm-up fade), which the scope is too fast to show
+            {
+                const int E = Engine::kEaseLen;
+                int ew = gEngine.easeW.load(std::memory_order_relaxed);
+                float emax = 0.02f;
+                for (int i = 0; i < E; i++) emax = std::max(emax, gEngine.easeHist[z][i]);
+                float ex0 = o.x + 72, ex1 = o.x + w - 12;
+                float eb = ly + lane - volH - 6;                       // baseline, just above the wave rect's floor
+                float eh = (lane - volH - 12) * 0.5f;                  // never above the centre line
+                static ImVec2 ep[Engine::kEaseLen];
+                for (int i = 0; i < E; i++) {
+                    float v = gEngine.easeHist[z][(ew + i) % E] / emax;   // oldest → newest, left → right
+                    float x = ex0 + (ex1 - ex0) * i / (float)(E - 1);
+                    float yv = eb - eh * std::min(1.0f, v);
+                    ep[i] = ImVec2(x, yv);
+                    dl->AddLine(ImVec2(x, yv), ImVec2(x, eb), LB(0.06f), 1.0f);
+                }
+                dl->AddPolyline(ep, E, LB(0.14f), 0, 3.0f);
+                dl->AddPolyline(ep, E, LB(0.55f), 0, 1.2f);
+                if (gFontSmall) ImGui::PushFont(gFontSmall);
+                const char* et = "ease  ·  13 s";
+                ImVec2 ets = ImGui::CalcTextSize(et);
+                dl->AddText(ImVec2(ex1 - ets.x, ly + 7), LB(0.30f), et);   // top-right corner, off the traces
+                if (gFontSmall) ImGui::PopFont();
+            }
             // auto-scale each ring to its own recent peak so every lane draws a full wave
             float gain = gScopeGain * 0.9f / std::max(peakOf(gEngine.vibScope[z]), 0.02f);
             trace(1 + z, gEngine.vibScope[z], o.x + 72, o.x + w - 12, mid, amp, gain);
@@ -2456,9 +2555,55 @@ static void drawWaveBody(float w, bool audio = false) {
             dl->AddText(ImVec2(o.x + 12, mid - 13), W(0.75f), kZoneNames[z]);
             char hz[16]; snprintf(hz, sizeof hz, "%.0f Hz", gEngine.zoneHz[z].load());
             dl->AddText(ImVec2(o.x + 12, mid + 1), W(0.30f), hz);
+            if (audio) {
+                // the name opens the layer's effects row; a blue dot marks a
+                // layer that has been singled out (any effect off its default)
+                ImVec2 ns = ImGui::CalcTextSize(kZoneNames[z]);
+                if (layerFxActive(z)) dl->AddCircleFilled(ImVec2(o.x + 12 + ns.x + 7, mid - 7), 2.5f, LB(0.85f));
+                ImGui::SetCursorScreenPos(ImVec2(o.x + 6, mid - 16));
+                char nid[16]; snprintf(nid, sizeof nid, "##lane%d", z);
+                if (ImGui::InvisibleButton(nid, ImVec2(60, 34))) gLaneFx[z] = !gLaneFx[z];
+                if (ImGui::IsItemHovered()) ImGui::SetTooltip(fxOpen ? "close the layer effects" : "layer effects: tone · drive · pulse\n(kept across presets)");
+            }
             if (gFontSmall) ImGui::PopFont();
+            if (fxOpen) {
+                // TONE · DRIVE · PULSE: three thin sliders across the wave's width
+                float fy = ly + lane + 2;
+                dl->AddLine(ImVec2(o.x + 68, fy - 1), ImVec2(o.x + w - 8, fy - 1), W(0.05f), 1.0f);
+                const float fx0 = o.x + 68, fw = w - 76, gap = 14;
+                const float colW = (fw - 2 * gap) / 3.0f, labW = 44;
+                struct FxDef { const char* name; std::atomic<float>* p; const char* tip; };
+                FxDef defs[3] = {
+                    {"TONE", &gEngine.params.zoneTone[z], "low-pass over this layer: left = only the deepest, right = open"},
+                    {"DRIVE", &gEngine.params.zoneDrive[z], "soft saturation: louder, squarer"},
+                    {"PULSE", &gEngine.params.zonePulse[z], "tremolo at the session's entrainment rate"},
+                };
+                ImGui::PushStyleVar(ImGuiStyleVar_FramePadding, ImVec2(0, 0));
+                ImGui::PushStyleVar(ImGuiStyleVar_GrabMinSize, 6.0f);
+                ImGui::PushStyleVar(ImGuiStyleVar_FrameRounding, 4.0f);
+                ImGui::PushStyleColor(ImGuiCol_SliderGrab, ImVec4(1, 1, 1, 0.85f));
+                ImGui::PushStyleColor(ImGuiCol_SliderGrabActive, ImVec4(1, 1, 1, 1));
+                if (gFontSmall) ImGui::PushFont(gFontSmall);
+                for (int k = 0; k < 3; k++) {
+                    float x = fx0 + k * (colW + gap);
+                    bool live = k == 0 ? defs[k].p->load() < 0.995f : defs[k].p->load() > 0.001f;
+                    dl->AddText(ImVec2(x, fy + 8), W(live ? 0.75f : 0.32f), defs[k].name);
+                    ImGui::SetCursorScreenPos(ImVec2(x + labW, fy + 9));
+                    ImGui::SetNextItemWidth(colW - labW);
+                    char sid[24]; snprintf(sid, sizeof sid, "##lfx%d_%d", z, k);
+                    float v = defs[k].p->load();
+                    if (ImGui::SliderFloat(sid, &v, 0.0f, 1.0f, "")) { defs[k].p->store(v); saveLayerFx(); }
+                    if (ImGui::IsItemHovered()) ImGui::SetTooltip("%s", defs[k].tip);
+                    ImVec2 r0 = ImGui::GetItemRectMin(), r1 = ImGui::GetItemRectMax();
+                    dl->AddRectFilled(ImVec2(r0.x, r0.y), ImVec2(r0.x + (r1.x - r0.x) * v, r1.y), W(0.14f), 4.0f);
+                }
+                if (gFontSmall) ImGui::PopFont();
+                ImGui::PopStyleColor(2);
+                ImGui::PopStyleVar(3);
+            }
+            ly += laneH + laneGap;
         }
-        y = top + NZONES * (lane + laneGap) + 8;
+        y = ly - laneGap + 8;
         if (audio) {
             // engine parameters: a 5 × 2 grid, label · value bar · live line
             const float colGap = 18;
@@ -2995,8 +3140,92 @@ static void drawIcon(ImDrawList* d, int icon, ImVec2 c, float s, ImU32 col) {
 static void fmtTime(char* out, size_t n, double sec) {
     int s = (int)sec; snprintf(out, n, "%d:%02d", s / 60, s % 60);
 }
+// LIVE SET: a DAW plays the bed directly over a multichannel device
+static void drawLiveSet(float w) {
+    ImGui::TextDisabled("LIVE SET   ·   a DAW plays the bed directly, over a multichannel device, while you write");
+    ImGui::Spacing();
+    static std::vector<OutDevice> devs;
+    static double lastScan = -10;
+    static int sel = -1;
+    double now = glfwGetTime();
+    if (now - lastScan > 2.0) {          // hot-plug: same cadence as the other pickers
+        lastScan = now;
+        devs.clear();
+        for (const auto& d : listInputDevices()) if (d.channels >= 3) devs.push_back(d);
+        if (sel >= (int)devs.size()) sel = -1;
+        if (sel < 0 && gBed.running()) for (int i = 0; i < (int)devs.size(); i++) if (devs[i].id == gBed.deviceID) sel = i;
+        if (sel < 0 && !gBed.running()) {
+            // prefer a virtual 16-channel device (BlackHole), the usual DAW bridge
+            for (int i = 0; i < (int)devs.size(); i++)
+                if (devs[i].name.find("BlackHole") != std::string::npos && devs[i].channels >= 7) { sel = i; break; }
+        }
+    }
+    const bool on = gBed.running();
+    const char* cur = (sel >= 0 && sel < (int)devs.size()) ? devs[sel].name.c_str() : "Choose an input device…";
+    ImGui::SetNextItemWidth(std::min(w - 170.0f, 340.0f));
+    if (ImGui::BeginCombo("##beddev", cur)) {
+        for (int i = 0; i < (int)devs.size(); i++) {
+            char row[160];
+            snprintf(row, sizeof row, "%s  ·  %d in  ·  %.0fk", devs[i].name.c_str(), devs[i].channels, devs[i].sampleRate / 1000.0);
+            if (ImGui::Selectable(row, i == sel)) {
+                sel = i;
+                if (on) { gBed.stop(); if (!gBed.start(devs[i].id)) gBedMsg = gBed.lastError; }
+            }
+        }
+        ImGui::EndCombo();
+    }
+    ImGui::SameLine();
+    if (on) ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.35f, 0.65f, 1.0f, 0.55f));
+    if (ImGui::Button(on ? "ON" : "OFF", ImVec2(56, 0))) {
+        if (on) { gBed.stop(); gBedMsg.clear(); }
+        else if (sel >= 0 && sel < (int)devs.size()) {
+            if (!gPlaying) startAudio();
+            if (gBed.start(devs[sel].id)) {
+                gBedMsg.clear();
+                fprintf(stderr, "[bed] live set from %s: %d inputs\n", devs[sel].name.c_str(), gBed.deviceChannels);
+            } else gBedMsg = gBed.lastError;
+        } else gBedMsg = "pick the device the DAW is playing into";
+    }
+    if (on) ImGui::PopStyleColor();
+    if (ImGui::IsItemHovered()) ImGui::SetTooltip(on ? "stop: the live engine takes the bed back" : "start: the DAW's channels replace the tap and the engine's zones");
+    if (!gBedMsg.empty()) { ImGui::SameLine(); ImGui::TextColored(ImVec4(1, 0.75f, 0.3f, 1), "%s", gBedMsg.c_str()); }
+    // the 7-wide block: where it starts on the device
+    {
+        int first = gBed.firstChan.load() + 1;
+        int maxFirst = on ? std::max(1, gBed.deviceChannels - BedInput::kCh + 1)
+                          : (sel >= 0 && sel < (int)devs.size() ? std::max(1, devs[sel].channels - BedInput::kCh + 1) : 64);
+        ImGui::SetNextItemWidth(90);
+        if (ImGui::InputInt("first channel", &first, 1, 1)) gBed.firstChan.store(std::min(std::max(first, 1), maxFirst) - 1);
+        int f = gBed.firstChan.load() + 1;
+        ImGui::SameLine();
+        ImGui::TextDisabled("ch %d-%d music  ·  %d HEAD  ·  %d HEART  ·  %d BELLY  ·  %d BUTT  ·  %d FEET",
+                            f, f + 1, f + 2, f + 3, f + 4, f + 5, f + 6);
+    }
+    // meters, and per zone: from the DAW or filled by the engine (click to flip)
+    static const char* names[BedInput::kCh] = {"MUSIC L", "MUSIC R", "HEAD", "HEART", "BELLY", "BUTT", "FEET"};
+    for (int c = 0; c < BedInput::kCh; c++) {
+        if (c) ImGui::SameLine();
+        float pk = gBed.peak[c].load();
+        bool daw = c < 2 || gBed.zoneFromDaw[c - 2].load();
+        ImVec4 col = !on ? ImVec4(1, 1, 1, 0.25f)
+                   : !daw ? ImVec4(1, 1, 1, 0.35f)
+                   : ImVec4(0.55f + 0.45f * std::min(1.0f, pk * 2), 1, 0.7f, 1);
+        char lab[32]; snprintf(lab, sizeof lab, "%s%s##bedch%d", names[c], (c >= 2 && !daw) ? " (engine)" : "", c);
+        ImGui::PushStyleColor(ImGuiCol_Text, col);
+        if (ImGui::SmallButton(lab) && c >= 2) gBed.zoneFromDaw[c - 2].store(daw ? 0 : 1);
+        ImGui::PopStyleColor();
+        if (c >= 2 && ImGui::IsItemHovered()) ImGui::SetTooltip(daw ? "from the DAW — click to let the engine fill this zone from the music"
+                                                                     : "filled by the engine — click to take it from the DAW");
+    }
+    ImGui::Spacing();
+    ImGui::TextDisabled("In the DAW set the output to BlackHole 16ch (or the interface's loopback) and put each track on its channel.");
+    ImGui::TextDisabled("Zones left to the engine follow the music; stems and engine are aligned by the sync look-ahead.");
+}
+
 static void drawPlayBody(float w) {
-    ImGui::TextDisabled("SET   ·   stems exported from Ableton, one file per zone, straight to the bed");
+    drawLiveSet(w);
+    ImGui::Spacing(); ImGui::Separator(); ImGui::Spacing();
+    ImGui::TextDisabled("SET   ·   stems exported from a DAW, one file per zone, straight to the bed");
     ImGui::Spacing();
     if (ImGui::Button("Load set folder…", ImVec2(150, 28))) {
         std::string p = pickFolderDialog("Choose the set folder");
@@ -3012,6 +3241,8 @@ static void drawPlayBody(float w) {
         ImGui::TextDisabled("Export from Ableton: File > Export Audio/Video, Rendered Track = Selected Tracks Only");
         ImGui::TextDisabled("with the five zone returns + Master selected, 48 kHz, 24-bit WAV, Normalize off.");
         ImGui::TextDisabled("Files are matched by name: head / heart / belly / root (butt) / feet, master or hp.");
+        ImGui::TextDisabled("A set may bring only some zones: the live engine fills the rest from the music.");
+        ImGui::TextDisabled("Full spec: docs/AVA-STEM-SPEC.md");
         return;
     }
     ImGui::Spacing();
@@ -3045,8 +3276,12 @@ static void drawPlayBody(float w) {
         ImGui::TextDisabled("starts at %s (leading silence skipped)", li);
     }
     ImGui::Spacing();
-    ImGui::TextDisabled(gPlayer.active() ? "stems own the bed: engine vibration is bypassed, music pair = the set's own music"
-                                         : "stopped: live engine is back on the tapped music");
+    if (gPlayer.active()) {
+        int missing = 0;
+        for (int k = 1; k < StemPlayer::kStems; k++) if (!gPlayer.has[k]) missing++;
+        if (missing) ImGui::TextDisabled("stems own their zones; the engine fills the %d without one from the set's music", missing);
+        else ImGui::TextDisabled("stems own the bed: engine vibration is bypassed, music pair = the set's own music");
+    } else ImGui::TextDisabled("stopped: live engine is back on the tapped music");
     ImGui::Spacing();
     if (ImGui::SmallButton("Unload")) { gPlayer.unload(); gPlayerMsg.clear(); }
 }
@@ -3281,6 +3516,9 @@ static void drawOctagonLauncher(ImDrawList* dl, ImVec2 c, float R) {
 static int runRouteTest(const char* devSub);
 static int runShaderTest();
 static int runPing(int argc, char** argv);
+static int runBedTest(const char* devName);
+static int runStereoTest();
+static int runInputTest(const char* devName);
 static int runPadTest();
 static int runSoundTest();
 static int runSplitTest(const char* wavPath);
@@ -3289,6 +3527,9 @@ int main(int argc, char** argv) {
     if (argc > 1 && std::strcmp(argv[1], "--selftest") == 0) return runSelfTest();
     if (argc > 2 && std::strcmp(argv[1], "--routetest") == 0) return runRouteTest(argv[2]);
     if (argc > 2 && std::strcmp(argv[1], "--ping") == 0) return runPing(argc - 2, argv + 2);
+    if (argc > 1 && std::strcmp(argv[1], "--bedtest") == 0) return runBedTest(argc > 2 ? argv[2] : nullptr);
+    if (argc > 1 && std::strcmp(argv[1], "--stereotest") == 0) return runStereoTest();
+    if (argc > 1 && std::strcmp(argv[1], "--intest") == 0) return runInputTest(argc > 2 ? argv[2] : nullptr);
     if (argc > 1 && std::strcmp(argv[1], "--padtest") == 0) return runPadTest();
     if (argc > 1 && std::strcmp(argv[1], "--soundtest") == 0) return runSoundTest();
     if (argc > 1 && std::strcmp(argv[1], "--splittest") == 0) return runSplitTest(argc > 2 ? argv[2] : nullptr);
@@ -3303,7 +3544,7 @@ int main(int argc, char** argv) {
     // drop a set folder (or one of its stems) anywhere on the window to load it
     glfwSetDropCallback(win, [](GLFWwindow*, int count, const char** paths) {
         if (count < 1) return;
-        if (gPlayer.load(paths[0])) { gPlayerMsg = "loaded " + gPlayer.name; gMode = 2; gArtifactTab = 3; }
+        if (gPlayer.load(paths[0])) { gPlayerMsg = "loaded " + gPlayer.name; gMode = 2; gArtifactTab = 2; }
         else gPlayerMsg = gPlayer.lastError;
     });
     glfwMakeContextCurrent(win);
@@ -3373,6 +3614,7 @@ int main(int argc, char** argv) {
     gEngine.init();
     gRing.init(48000); // 1 s
     gOut.player = &gPlayer;
+    gOut.bed = &gBed;
     gDevices = listOutputDevices();
     { std::lock_guard<std::mutex> lk(gDevMx); gDevScan = gDevices; }
     startDeviceScanner();
@@ -3390,7 +3632,7 @@ int main(int argc, char** argv) {
     applyPreset(kTabPreset[0]);
     // screenshot / automation hooks: start on a given mode + artifact sub-tab
     if (const char* m = getenv("AVA_MODE")) gMode = std::min(std::max(atoi(m), 0), 2);
-    if (const char* t = getenv("AVA_ARTIFACT_TAB")) gArtifactTab = std::min(std::max(atoi(t), 0), 3);
+    if (const char* t = getenv("AVA_ARTIFACT_TAB")) gArtifactTab = std::min(std::max(atoi(t), 0), 2);
     if (const char* t = getenv("AVA_VISUAL_TAB")) gVisualTab = std::min(std::max(atoi(t), 0), 1);
     if (getenv("AVA_SETTINGS")) gShowHealth = true;
     if (getenv("AVA_MINI")) setMini(win, true);
@@ -3415,6 +3657,7 @@ int main(int argc, char** argv) {
     for (auto& row : gOutCcLast) for (int& v : row) v = -1;
     loadTunerState();
     loadDeletedShaders();
+    loadLayerFx();
 
     // shader background library — bundled copy first, dev checkout as fallback
     gShaders.loadLibrary(shaderLibraryDir());
@@ -3452,11 +3695,10 @@ int main(int argc, char** argv) {
 
         processMidi(glfwGetTime(), ImGui::GetIO().DeltaTime);
         keyboardLauncher();
-#ifdef __APPLE__
         { static double tIn = 0; double tn = glfwGetTime();
-          if (gIn.running() && tn - tIn > 2.0) { tIn = tn; float pk = gIn.peak.load();
-            if (pk > 0.01f) fprintf(stderr, "[input] peak %.2f\n", pk); } }
-#endif
+          static float inPkMax = 0; inPkMax = std::max(inPkMax, gIn.peak.load());   // hold the 2 s max: speech is gone by the time a sample lands
+          if (gIn.running() && tn - tIn > 2.0) { tIn = tn;
+            if (inPkMax > 0.01f) fprintf(stderr, "[input] peak %.2f\n", inPkMax); inPkMax = 0; } }
 
         // TEST ALL sweep: when the current zone's pulse ends, fire the next,
         // so each amp/transducer can be verified by feel in order
@@ -3795,13 +4037,11 @@ int main(int argc, char** argv) {
                     if (ImGui::SliderFloat("##therm", &lim, 0.0f, 0.8f, lim > 0.001f ? "%.2f" : "off"))
                         gEngine.params.thermalLimit.store(lim);
                     if (ImGui::IsItemHovered()) ImGui::SetTooltip("45 s RMS budget per ring channel; HOT = easing that channel down");
-#ifdef __APPLE__
                     ImGui::Text("Live input guard");
                     ImGui::SameLine(180);
                     if (!(gInOn && gIn.running())) ImGui::TextDisabled("input off");
                     else if (gIn.autoTrim.load() < 0.99f) ImGui::TextColored(ImVec4(1, 0.55f, 0.3f, 1), "holding %.0f dB", 20.0f * log10f(gIn.autoTrim.load()));
                     else ImGui::TextDisabled("clear");
-#endif
                     ImGui::Text("Output limiter");
                     ImGui::SameLine(180);
                     float worst = 0;
@@ -3993,39 +4233,80 @@ int main(int argc, char** argv) {
                         gTestPulse[z] = 0.7f;
                     }
                 }
-#ifdef __APPLE__
                 // ── live input: the interface's own inputs into the engine ──
                 ImGui::Separator();
                 ImGui::TextDisabled("LIVE INPUT");
                 {
+                    const ImVec4 warn(1, 0.75f, 0.3f, 1);
+                    // ROW 1 — the device, full width so a long name is never cut off
+                    static std::vector<OutDevice> inDevs; static double inScanT = -10;
+                    if (glfwGetTime() - inScanT > 2.0) { inScanT = glfwGetTime(); inDevs = listInputDevices(); }
+                    std::string cur = "Automatic";
+                    if (gInDevId) { for (auto& d : inDevs) if (d.id == gInDevId) cur = d.name; }
+                    else if (!gInDevName.empty()) cur = "Automatic  ·  " + gInDevName;
+                    ImGui::SetNextItemWidth(ImGui::GetContentRegionAvail().x);
+                    if (ImGui::BeginCombo("##indev", cur.c_str())) {
+                        if (ImGui::Selectable("Automatic  ·  the interface when it has inputs, else the Mac's mic", gInDevId == 0)) { gInDevId = 0; if (gInOn) setInput(true); }
+                        for (auto& d : inDevs) {
+                            char row[160]; snprintf(row, sizeof row, "%s  ·  %d in", d.name.c_str(), d.channels);
+                            if (ImGui::Selectable(row, d.id == gInDevId)) { gInDevId = d.id; if (gInOn) setInput(true); }
+                        }
+                        ImGui::EndCombo();
+                    }
+                    if (ImGui::IsItemHovered()) ImGui::SetTooltip("the device whose inputs feed the engine (and the INPUT wave)");
+                    // ROW 2 — on/off and one plain status line
                     bool on = gInOn;
                     if (ImGui::Checkbox("Input on", &on)) setInput(on);
+                    ImGui::SameLine(0, 14);
+                    int auth = micAuthStatus();
+                    if (!gInOn) ImGui::TextDisabled("off");
+                    else if (auth == 1) {
+                        ImGui::TextColored(warn, "microphone blocked by macOS");
+                        ImGui::SameLine();
+                        if (ImGui::SmallButton("Open Privacy settings"))
+                            system("open 'x-apple.systempreferences:com.apple.preference.security?Privacy_Microphone' &");
+                        if (ImGui::IsItemHovered()) ImGui::SetTooltip("System Settings > Privacy & Security > Microphone > turn on AVA OS, then toggle Input off/on");
+                    } else if (auth == 0) ImGui::TextColored(warn, "waiting for microphone permission");
+                    else if (gIn.running()) ImGui::TextDisabled("%s  ·  %d input%s", gInDevName.c_str(), gIn.deviceChannels, gIn.deviceChannels == 1 ? "" : "s");
+                    else ImGui::TextColored(warn, "%s", gIn.lastError.empty() ? "not running" : gIn.lastError.c_str());
                     if (gInOn && gIn.running()) {
+                        // ROW 3 — which inputs, gain, level: label BEFORE each control
                         int nin = std::max(1, gIn.deviceChannels);
                         int cl = gIn.chanL.load() + 1, cr = gIn.chanR.load() + 1;
-                        ImGui::SameLine(0, 14);
-                        ImGui::SetNextItemWidth(70);
-                        if (ImGui::InputInt("L##inl", &cl, 1, 1)) gIn.chanL.store(std::min(std::max(cl, 1), nin) - 1);
-                        ImGui::SameLine();
-                        ImGui::SetNextItemWidth(70);
-                        if (ImGui::InputInt("R##inr", &cr, 1, 1)) gIn.chanR.store(std::min(std::max(cr, 1), nin) - 1);
-                        ImGui::SameLine();
+                        if (nin == 1) {
+                            ImGui::TextDisabled("mono");
+                            gIn.chanL.store(0); gIn.chanR.store(0);
+                        } else {
+                            ImGui::TextDisabled("L"); ImGui::SameLine(0, 6);
+                            ImGui::SetNextItemWidth(72);
+                            if (ImGui::InputInt("##inl", &cl, 1, 1)) gIn.chanL.store(std::min(std::max(cl, 1), nin) - 1);
+                            if (ImGui::IsItemHovered()) ImGui::SetTooltip("interface input for the left side (same as R = mono)");
+                            ImGui::SameLine(0, 14);
+                            ImGui::TextDisabled("R"); ImGui::SameLine(0, 6);
+                            ImGui::SetNextItemWidth(72);
+                            if (ImGui::InputInt("##inr", &cr, 1, 1)) gIn.chanR.store(std::min(std::max(cr, 1), nin) - 1);
+                            if (ImGui::IsItemHovered()) ImGui::SetTooltip("interface input for the right side");
+                        }
+                        ImGui::SameLine(0, 18);
+                        ImGui::TextDisabled("GAIN"); ImGui::SameLine(0, 6);
                         float g = gIn.gain.load();
                         ImGui::SetNextItemWidth(110);
-                        if (ImGui::SliderFloat("##ingain", &g, 0.0f, 8.0f, "gain %.1fx")) gIn.gain.store(g);
-                        ImGui::SameLine();
+                        if (ImGui::SliderFloat("##ingain", &g, 0.0f, 8.0f, "%.1fx")) gIn.gain.store(g);
+                        ImGui::SameLine(0, 18);
+                        ImGui::TextDisabled("LEVEL"); ImGui::SameLine(0, 6);
                         float pk = gIn.peak.load();
                         ImVec2 mp = ImGui::GetCursorScreenPos();
-                        ImGui::GetWindowDrawList()->AddRectFilled(ImVec2(mp.x, mp.y + 6), ImVec2(mp.x + 80, mp.y + 14), IM_COL32(255, 255, 255, 18), 3);
+                        const float mw = 110, mh = 8, my = mp.y + (ImGui::GetFrameHeight() - mh) / 2;
+                        ImGui::GetWindowDrawList()->AddRectFilled(ImVec2(mp.x, my), ImVec2(mp.x + mw, my + mh), IM_COL32(255, 255, 255, 18), 3);
                         if (pk > 0.003f)
-                            ImGui::GetWindowDrawList()->AddRectFilled(ImVec2(mp.x, mp.y + 6), ImVec2(mp.x + 80 * std::min(1.0f, pk), mp.y + 14),
+                            ImGui::GetWindowDrawList()->AddRectFilled(ImVec2(mp.x, my), ImVec2(mp.x + mw * std::min(1.0f, pk), my + mh),
                                                                       pk > 0.98f ? IM_COL32(255, 120, 90, 255) : IM_COL32(140, 235, 255, 230), 3);
-                        ImGui::Dummy(ImVec2(84, 0));
+                        ImGui::Dummy(ImVec2(mw, ImGui::GetFrameHeight()));
                         {
                             float trim = gIn.autoTrim.load();
                             bool clip = gIn.clipHold.load() > 0.0f;
                             if (trim < 0.99f) {
-                                ImGui::SameLine();
+                                ImGui::SameLine(0, 10);
                                 ImGui::TextColored(ImVec4(1, 0.55f, 0.3f, 1), "GUARD %.0f dB", 20.0f * log10f(trim));
                                 if (ImGui::IsItemHovered())
                                     ImGui::SetTooltip("The input sat at full scale, so it was pulled down.\n"
@@ -4034,19 +4315,15 @@ int main(int argc, char** argv) {
                                                       "(feedback). Turn the source / interface gain down, or\n"
                                                       "break the loop; the guard eases back up on its own.");
                             } else if (clip) {
-                                ImGui::SameLine();
+                                ImGui::SameLine(0, 10);
                                 ImGui::TextColored(ImVec4(1, 0.45f, 0.35f, 1), "CLIP");
                             }
                         }
                         bool hear = gOut.inToSpeakers.load();
                         if (ImGui::Checkbox("Hear the input too", &hear)) gOut.inToSpeakers.store(hear);
                         if (ImGui::IsItemHovered()) ImGui::SetTooltip("off = felt only; your amp makes the sound");
-                    } else if (gInOn) {
-                        ImGui::SameLine();
-                        ImGui::TextColored(ImVec4(1, 0.75f, 0.3f, 1), "%s", gIn.lastError.c_str());
                     }
                 }
-#endif
                 {
                     bool mon = gEngine.params.monitorVibOnStereo.load() != 0;
                     if (ImGui::Checkbox("Hear the bed on stereo outputs", &mon))
@@ -4157,12 +4434,9 @@ int main(int argc, char** argv) {
             if (gMode == 1) {
                 drawVisualBody(win, bw);
             } else {
-                // ARTIFACT sub-tabs: Sounds · Tune (MIDI lives in Settings; the
-                // stem Play page is parked — reachable only by dropping a folder)
-                // Tune first, then Sounds (tab 0 = Tune, 1 = Sounds, 3 = Play)
-                static const char* subs[2] = {"Tune", "Sounds"};
-                if (gArtifactTab == 2) gArtifactTab = 0;
-                subNav(subs, 2, &gArtifactTab, bw);
+                // ARTIFACT sub-tabs: Tune · Sounds · Play (MIDI lives in Settings)
+                static const char* subs[3] = {"Tune", "Sounds", "Play"};
+                subNav(subs, 3, &gArtifactTab, bw);
                 if (gArtifactTab == 0) drawTunerBody();
                 else if (gArtifactTab == 1) drawSoundsBody(bw);
                 else drawPlayBody(bw);
@@ -4180,7 +4454,8 @@ int main(int argc, char** argv) {
         const float gutter = 24;              // vertical rhythm between blocks
         {
             float tx = cardX + pad, ty = bodyY, tw = cardW - 2 * pad, th = 22;
-            float each = tw / 5.0f;
+            const float chev = 28;                // "all presets" chevron at the right end
+            float each = (tw - chev) / 5.0f;
             for (int t = 0; t < 5; t++) {
                 ImVec2 ts = ImGui::CalcTextSize(kTabNames[t]);
                 ImVec2 c0(tx + t * each, ty);
@@ -4195,15 +4470,56 @@ int main(int argc, char** argv) {
                 dl->AddText(ImVec2(wx, ty), W(active ? 0.95f : (ImGui::IsItemHovered() ? 0.7f : 0.38f)), kTabNames[t]);
                 if (active) dl->AddLine(ImVec2(wx, ty + th + 2), ImVec2(wx + ts.x, ty + th + 2), W(0.9f), 1.5f);
             }
+            {
+                // the chevron: every preset, the strip's five included; lit
+                // when the active preset is one the strip doesn't show
+                ImVec2 c0(tx + tw - chev, ty);
+                ImGui::SetCursorScreenPos(c0);
+                if (ImGui::InvisibleButton("##tabmore", ImVec2(chev, th))) ImGui::OpenPopup("##presetmenu");
+                bool lit = gActiveTab < 0, hov = ImGui::IsItemHovered();
+                if (hov) ImGui::SetTooltip("all presets");
+                float cxm = c0.x + chev / 2, cym = ty + th / 2 + 1;
+                dl->AddTriangleFilled(ImVec2(cxm - 5, cym - 3), ImVec2(cxm + 5, cym - 3), ImVec2(cxm, cym + 3),
+                                      W(lit ? 0.95f : (hov ? 0.7f : 0.38f)));
+                if (lit) dl->AddLine(ImVec2(cxm - 6, ty + th + 2), ImVec2(cxm + 6, ty + th + 2), W(0.9f), 1.5f);
+                ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(14, 10));
+                ImGui::PushStyleVar(ImGuiStyleVar_ItemSpacing, ImVec2(8, 6));
+                ImGui::PushStyleColor(ImGuiCol_PopupBg, ImVec4(0.05f, 0.05f, 0.055f, 0.98f));
+                if (ImGui::BeginPopup("##presetmenu")) {
+                    for (int i = 0; i < kNumPresets; i++) {
+                        bool sel = i == gActivePreset;
+                        if (ImGui::Selectable(kPresets[i].name, sel)) {
+                            applyPreset(i);
+                            gActiveTab = -1;
+                            for (int t = 0; t < 5; t++) if (kTabPreset[t] == i) gActiveTab = t;
+                        }
+                        if (gFontSmall) ImGui::PushFont(gFontSmall);
+                        ImGui::SameLine(120);
+                        ImGui::TextColored(ImVec4(1, 1, 1, 0.32f), "%s", kPresetCaption[i]);
+                        if (gFontSmall) ImGui::PopFont();
+                    }
+                    ImGui::EndPopup();
+                }
+                ImGui::PopStyleColor();
+                ImGui::PopStyleVar(2);
+            }
+            {
+                // the caption: what the machine is doing on this preset
+                const char* cap = kPresetCaption[gActivePreset];
+                if (gFontSmall) ImGui::PushFont(gFontSmall);
+                ImVec2 cs = ImGui::CalcTextSize(cap);
+                dl->AddText(ImVec2(tx + (tw - cs.x) / 2, ty + th + 9), W(0.30f), cap);
+                if (gFontSmall) ImGui::PopFont();
+            }
         }
 
         // the body: MASTER (input + the floaters), the five rings as scopes
         // with their volume under each, and the engine parameters
         {
-            ImGui::SetCursorScreenPos(ImVec2(cardX + pad, bodyY + 22 + gutter - 6));
+            ImGui::SetCursorScreenPos(ImVec2(cardX + pad, bodyY + 22 + 18 + gutter - 6));
             ImGui::PushStyleColor(ImGuiCol_ChildBg, ImVec4(0, 0, 0, 0));
             ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(0, 0));
-            ImGui::BeginChild("##audiobody", ImVec2(cardW - 2 * pad, cardY + cardH - pad - (bodyY + 22 + gutter - 6)), false,
+            ImGui::BeginChild("##audiobody", ImVec2(cardW - 2 * pad, cardY + cardH - pad - (bodyY + 22 + 18 + gutter - 6)), false,
                               ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_AlwaysVerticalScrollbar * 0);
             ImGui::PushStyleVar(ImGuiStyleVar_ItemSpacing, ImVec2(8, 9));
             ImGui::PushStyleVar(ImGuiStyleVar_FramePadding, ImVec2(10, 7));
@@ -4239,7 +4555,6 @@ int main(int argc, char** argv) {
                 for (int l = -1; l <= 1; l++)
                     dl->AddLine(ImVec2(b0.x + 7, 42 + l * 5.0f), ImVec2(b0.x + 21, 42 + l * 5.0f), hc, 1.5f);
             }
-#ifdef __APPLE__
             // live-input guard / clip flag: the one thing worth shouting about
             // up here, because it means the felt output is being protected
             if (gInOn && gIn.running()) {
@@ -4255,7 +4570,6 @@ int main(int argc, char** argv) {
                     if (gFontSmall) ImGui::PopFont();
                 }
             }
-#endif
             {
                 // sound coming in: one green dot
                 bool signal = gTap.running() && gTap.inputPeak.load() > 0.003f;
@@ -4711,6 +5025,132 @@ static int runShaderTest() {
 // 1-based UMC1820 outputs, one after another, with the interface's own
 // per-output volume/mute state printed so a dead jack can be told from a
 // dead amp. Zone routing is bypassed entirely.
+// --intest [device substring]: open an input device (default: the Mac's
+// default input) with the live-input unit for 4 s and print the peak seen,
+// headlessly — the frame-loop log stalls when the display sleeps
+static int runInputTest(const char* devName) {
+    auto ins = listInputDevices();
+    printf("input devices:\n");
+    for (auto& d : ins) printf("  %-40s %2d in  %.0f Hz\n", d.name.c_str(), d.channels, d.sampleRate);
+    unsigned dev = 0; std::string name;
+    if (devName) { for (auto& d : ins) if (d.name.find(devName) != std::string::npos) { dev = d.id; name = d.name; break; } }
+    else { dev = defaultInputDevice(); for (auto& d : ins) if (d.id == dev) name = d.name; }
+    if (!dev) { printf("FAIL: no such input device\n"); return 1; }
+    int auth = micAuthStatus();
+    printf("microphone permission: %s\n", auth == 2 ? "allowed" : auth == 0 ? "not asked yet" : "DENIED");
+    StereoRing ring; ring.init(48000);
+    InputUnit in;
+    if (!in.start(dev, &ring)) { printf("FAIL: %s\n", in.lastError.c_str()); return 1; }
+    printf("listening on %s (%d inputs) for 4 s...\n", name.c_str(), in.deviceChannels);
+    float pk = 0; long frames = 0;
+    std::vector<float> L(512), R(512);
+    for (int t = 0; t < 800; t++) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(5));   // no run loop on purpose: the HAL must not need ours
+        pk = std::max(pk, in.peak.load());
+        frames += ring.pop(L.data(), R.data(), 512);
+    }
+    long cbs = in.cbCount.load(); int le = in.lastErr.load();
+    in.stop();
+    printf("device rate %.0f Hz  callbacks %ld  last render status %d\n", in.hwRate, cbs, le);
+    printf("frames captured %ld (%.1f s)  peak %.4f  %s\n", frames, frames / 48000.0, pk,
+           frames < 48000 ? "FAIL: no audio callbacks" : pk > 0.01f ? "PASS: signal" : "silent (callbacks fine, nothing heard)");
+    return frames < 48000 ? 1 : 0;
+}
+
+// --stereotest: does STEREO mode place the low end by side? Feed a 45 Hz
+// bass hard LEFT for 4 s, then hard RIGHT for 4 s, then centred for 4 s, and
+// print each zone's RMS in each phase (warm-up skipped). STEREO puts
+// HEAD + BELLY on the left and HEART + BUTT on the right.
+static int runStereoTest() {
+    const int sr = 48000, blk = 512;
+    Engine eng; eng.init();
+    eng.params.engineMode.store(3);
+    eng.params.syncLookaheadMs.store(0.0f);
+    std::vector<float> L(blk), R(blk), vib[NZONES];
+    float* out[NZONES];
+    for (int z = 0; z < NZONES; z++) { vib[z].assign(blk, 0); out[z] = vib[z].data(); }
+    double acc[3][NZONES] = {{0}}; long cnt[3] = {0};
+    double ph = 0;
+    const char* phaseName[3] = {"LEFT ", "RIGHT", "CENTRE"};
+    for (long f = 0; f < 12L * sr; f += blk) {
+        int phase = (int)(f / (4L * sr));
+        for (int i = 0; i < blk; i++) {
+            float s = (float)std::sin(ph) * 0.5f; ph += 2 * M_PI * 45.0 / sr;
+            L[i] = phase == 0 ? s : phase == 1 ? 0.0f : s;
+            R[i] = phase == 1 ? s : phase == 0 ? 0.0f : s;
+        }
+        eng.process(L.data(), R.data(), out, blk);
+        double tIn = (f % (4L * sr)) / (double)sr;
+        if (tIn > 2.0) {                         // measure the second half of each phase
+            for (int z = 0; z < NZONES; z++) for (int i = 0; i < blk; i++) acc[phase][z] += (double)out[z][i] * out[z][i];
+            cnt[phase] += blk;
+        }
+    }
+    static const char* zn[NZONES] = {"HEAD", "HEART", "BELLY", "BUTT", "FEET"};
+    printf("STEREO mode · 45 Hz bass · zone RMS\n%-7s", "");
+    for (int z = 0; z < NZONES; z++) printf("%8s", zn[z]);
+    printf("\n");
+    for (int p = 0; p < 3; p++) {
+        printf("%-7s", phaseName[p]);
+        for (int z = 0; z < NZONES; z++) printf("%8.3f", std::sqrt(acc[p][z] / std::max(1L, cnt[p])));
+        printf("\n");
+    }
+    // verdict: left rings should beat right rings when the bass is left, and vice versa
+    double lRings0 = std::sqrt(acc[0][HEAD]) + std::sqrt(acc[0][BELLY]), rRings0 = std::sqrt(acc[0][HEART]) + std::sqrt(acc[0][ROOT]);
+    double lRings1 = std::sqrt(acc[1][HEAD]) + std::sqrt(acc[1][BELLY]), rRings1 = std::sqrt(acc[1][HEART]) + std::sqrt(acc[1][ROOT]);
+    double sep0 = lRings0 / std::max(1e-9, rRings0), sep1 = rRings1 / std::max(1e-9, lRings1);
+    printf("separation  bass-left: left rings / right rings = %.2fx   bass-right: right / left = %.2fx\n", sep0, sep1);
+    bool ok = sep0 > 1.5 && sep1 > 1.5;
+    printf("%s stereo placement\n", ok ? "PASS" : "FAIL");
+    return ok ? 0 : 1;
+}
+
+// --bedtest [device substring]: capture a live set from a multichannel input
+// device for 3 s and run it through the output path with the master at 0
+// (nothing reaches the bed) — exercises BedInput, the hybrid mix and the
+// look-ahead alignment headlessly
+static int runBedTest(const char* devName) {
+    auto ins = listInputDevices();
+    printf("input devices:\n");
+    for (auto& d : ins) printf("  %-40s %2d in  %.0f Hz\n", d.name.c_str(), d.channels, d.sampleRate);
+    // the device named, else the one with the most inputs (a 2-channel
+    // device still exercises the path: its missing zones read as silence)
+    const OutDevice* in = nullptr;
+    for (auto& d : ins) {
+        if (devName && d.name.find(devName) == std::string::npos) continue;
+        if (d.channels >= 2 && (!in || d.channels > in->channels)) in = &d;
+    }
+    if (!in) { printf("FAIL: no input device with 2+ channels\n"); return 1; }
+    if (in->channels < BedInput::kCh) printf("note: %d inputs only — zones beyond the device read as silence\n", in->channels);
+    auto outs = listOutputDevices();
+    const OutDevice* out = nullptr;
+    for (auto& d : outs) if (!out || d.channels > out->channels) out = &d;
+    if (!out) { printf("FAIL: no output device\n"); return 1; }
+    printf("live set: %s (%d in) -> %s (%d out), master 0\n", in->name.c_str(), in->channels, out->name.c_str(), out->channels);
+    Engine eng; eng.init();
+    eng.params.masterVolume.store(0.0f);
+    StereoRing ring; ring.init(48000);
+    OutputUnit o;
+    BedInput bed;
+    o.bed = &bed;
+    if (!o.start(out->id, &eng, &ring)) { printf("FAIL output: %s\n", o.lastError.c_str()); return 1; }
+    if (!bed.start(in->id)) { printf("FAIL input: %s\n", bed.lastError.c_str()); o.stop(); return 1; }
+    bed.zoneFromDaw[BELLY].store(0);        // one zone left to the engine: the hybrid + alignment path
+    float pk[BedInput::kCh] = {0};
+    for (int t = 0; t < 30; t++) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(100));
+        for (int c = 0; c < BedInput::kCh; c++) pk[c] = std::max(pk[c], bed.peak[c].load());
+    }
+    int avail = bed.ring.available();
+    bed.stop(); o.stop();
+    printf("captured 3 s · ring backlog %d frames (%.1f ms)\n", avail, avail / 48.0);
+    static const char* names[BedInput::kCh] = {"MUSIC L", "MUSIC R", "HEAD", "HEART", "BELLY", "BUTT", "FEET"};
+    for (int c = 0; c < BedInput::kCh; c++) printf("  %-8s peak %.3f%s\n", names[c], pk[c], c == 2 + BELLY ? "  (engine-filled)" : "");
+    bool ok = avail < 48000 * 0.5;          // queue stayed tight: the output thread was consuming
+    printf("%s bed input path\n", ok ? "PASS" : "FAIL");
+    return ok ? 0 : 1;
+}
+
 static int runPing(int argc, char** argv) {
     std::vector<int> chans;
     float secs = 6.0f;

@@ -12,6 +12,8 @@
 #include "ringbuf.h"
 #include "engine.h"
 #include "stem_player.h"
+#include "bed_input.h"
+#include "dsp.h"
 
 struct OutDevice {
     unsigned id;
@@ -56,6 +58,12 @@ public:
     // optional stem player: while it is active its stems replace the engine's
     // vibration and the tapped music (the engine still analyses the music)
     StemPlayer* player = nullptr;
+    // optional live bed input (a DAW over a multichannel device): while it
+    // runs, its channels 1-2 are the music and 3-7 the zones it owns
+    BedInput* bed = nullptr;
+    // when authored zones (stems / DAW) and engine zones share the bed, the
+    // authored ones are held back by the engine's look-ahead so all align
+    dsp::DelayLine bedDelay_[NZONES];
     // live input goes to the ENGINE only by default (felt, not heard); on =
     // also mixed into the music / surround sends
     std::atomic<bool> inToSpeakers{false};
@@ -89,6 +97,11 @@ public:
     StereoRing* ring() { return ring_; }
 };
 
+// the whole per-block render, shared by both backends (audio_mix.cpp): pop the
+// tap (kept `tapTarget` frames deep), add the live input, let a live DAW feed
+// or a stem set take over the zones it brings, run the engine, lay out the
+// device channels into dst. ch = device channels.
+void renderOutputBlock(OutputUnit* self, Engine* eng, float* dst, int n, int ch, int tapTarget);
 // shared mixer (audio_mix.cpp) used by every platform backend
 // vibR: per-zone right-side signal for send 2 (STEREO mode) or null entries
 void mixOutputBlock(OutputUnit* self, Engine* eng, const float* L, const float* R,
